@@ -42,6 +42,15 @@ func (m *PremiumManager) GetPlanBySKUID(skuID string) *model.Plan {
 func (m *PremiumManager) GetPlanFeaturesForGuild(ctx context.Context, guildID string) (model.PlanFeatures, error) {
 	planFeatures := m.defaultPlanFeatures
 
+	for _, plan := range m.plans {
+		for _, planGuildID := range plan.GuildIDs {
+			if planGuildID == guildID {
+				planFeatures.Merge(plan.Features)
+				break
+			}
+		}
+	}
+
 	entitlements, err := m.pg.Q.GetActiveEntitlementsForGuild(ctx, sql.NullString{String: guildID, Valid: true})
 	if err != nil {
 		return planFeatures, fmt.Errorf("failed to retrieve entitlments for guild: %w", err)

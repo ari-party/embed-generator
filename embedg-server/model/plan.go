@@ -3,6 +3,7 @@ package model
 type Plan struct {
 	ID         string       `mapstructure:"id"`
 	SKUID      string       `mapstructure:"sku_id"`
+	GuildIDs   []string     `mapstructure:"guild_ids"`
 	Default    bool         `mapstructure:"default"`
 	Features   PlanFeatures `mapstructure:"features"`
 	Consumable bool         `mapstructure:"consumable"`
