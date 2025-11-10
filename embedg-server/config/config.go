@@ -16,6 +16,7 @@ func InitConfig() {
 		viper.SetConfigFile(CfgFile)
 	} else {
 		viper.AddConfigPath("./")
+		viper.AddConfigPath("/config/")
 		viper.SetConfigName("config")
 	}
 
