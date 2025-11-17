@@ -1,6 +1,6 @@
 # Embed Generator
 
-Railway test
+Railway test 2
 
 [![Release](https://github.com/merlinfuchs/embed-generator/actions/workflows/release.yaml/badge.svg)](https://github.com/merlinfuchs/embed-generator/releases)
 [![Docker image](https://github.com/merlinfuchs/embed-generator/actions/workflows/docker-push.yaml/badge.svg)](https://hub.docker.com/r/merlintor/embed-generator)
