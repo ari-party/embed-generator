@@ -53,7 +53,7 @@ func (m *PremiumManager) GetPlanForGuild(ctx context.Context, guildID common.ID)
 		return "", m.defaultPlanFeatures, fmt.Errorf("failed to retrieve entitlments for guild: %w", err)
 	}
 
-	name, features := m.planForEntitlements(entitlements)
+	name, features := m.planForGuild(guildID, entitlements)
 	return name, features, nil
 }
 
@@ -68,15 +68,31 @@ func (m *PremiumManager) GetPlanForUser(ctx context.Context, userID common.ID) (
 	return name, features, nil
 }
 
+func (m *PremiumManager) planForGuild(guildID common.ID, entitlements []model.Entitlement) (string, model.PlanFeatures) {
+	return m.planMatching(func(plan model.Plan) bool {
+		return slices.Contains(plan.GuildIDs, guildID.String()) || hasEntitlement(plan, entitlements)
+	})
+}
+
 func (m *PremiumManager) planForEntitlements(entitlements []model.Entitlement) (string, model.PlanFeatures) {
+	return m.planMatching(func(plan model.Plan) bool {
+		return hasEntitlement(plan, entitlements)
+	})
+}
+
+func hasEntitlement(plan model.Plan, entitlements []model.Entitlement) bool {
+	return plan.SKUID != "" && slices.ContainsFunc(entitlements, func(e model.Entitlement) bool {
+		return e.SkuID == plan.SKUID
+	})
+}
+
+func (m *PremiumManager) planMatching(matches func(model.Plan) bool) (string, model.PlanFeatures) {
 	name := ""
 	rank := -1
 	features := m.defaultPlanFeatures
 
 	for _, plan := range m.config.Plans {
-		if plan.SKUID == "" || !slices.ContainsFunc(entitlements, func(e model.Entitlement) bool {
-			return e.SkuID == plan.SKUID
-		}) {
+		if !matches(plan) {
 			continue
 		}
 

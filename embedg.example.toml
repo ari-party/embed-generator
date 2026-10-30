@@ -80,10 +80,13 @@ max_template_ops = 1000
 max_kv_keys = 10
 
 # An additional premium plan that will apply when the user or guild has the SKU
+# or when the guild ID is included in guild_ids
 [[premium.plans]]
 id = "premium_server"
 name = "Premium"
 sku_id = "123"
+# Optional list of guild IDs that always have this plan
+guild_ids = ["987654321098765432"]
 
 [premium.plans.features]
 max_saved_messages = 100

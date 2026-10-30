@@ -19,6 +19,44 @@ func newPlanTestManager() *PremiumManager {
 	}}, common.Shards{}, nil, nil, nil)
 }
 
+func TestPlanForGuild(t *testing.T) {
+	m := NewPremiumManager(Config{Plans: []model.Plan{
+		{ID: "default", Default: true, Features: model.PlanFeatures{MaxSavedMessages: 25}},
+		{ID: "premium_server", Name: "Premium", SKUID: "premium", GuildIDs: []string{"123"}, Features: model.PlanFeatures{MaxSavedMessages: 100}},
+		{ID: "partner", GuildIDs: []string{"123"}, Features: model.PlanFeatures{MaxScheduledMessages: 50}},
+		{ID: "ultimate_server", Name: "Ultimate", SKUID: "ultimate", Features: model.PlanFeatures{MaxSavedMessages: 500}},
+	}}, common.Shards{}, nil, nil, nil)
+
+	tests := []struct {
+		name          string
+		guildID       common.ID
+		skus          []string
+		wantPlan      string
+		wantSaved     int
+		wantScheduled int
+	}{
+		{"hardcoded guild", 123, nil, "Premium", 100, 50},
+		{"other guild", 456, nil, "", 25, 0},
+		{"other guild with entitlement", 456, []string{"premium"}, "Premium", 100, 0},
+		{"entitlement on top of hardcoded guild", 123, []string{"ultimate"}, "Ultimate", 500, 50},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			entitlements := make([]model.Entitlement, len(tt.skus))
+			for i, sku := range tt.skus {
+				entitlements[i] = model.Entitlement{SkuID: sku}
+			}
+
+			plan, features := m.planForGuild(tt.guildID, entitlements)
+			if plan != tt.wantPlan || features.MaxSavedMessages != tt.wantSaved || features.MaxScheduledMessages != tt.wantScheduled {
+				t.Errorf("got %q with %d saved and %d scheduled, want %q with %d and %d",
+					plan, features.MaxSavedMessages, features.MaxScheduledMessages, tt.wantPlan, tt.wantSaved, tt.wantScheduled)
+			}
+		})
+	}
+}
+
 func TestGetPaidPlans(t *testing.T) {
 	plans := newPlanTestManager().GetPaidPlans()
 

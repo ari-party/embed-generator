@@ -3,6 +3,7 @@ package model
 type Plan struct {
 	ID         string       `toml:"id"`
 	SKUID      string       `toml:"sku_id"`
+	GuildIDs   []string     `toml:"guild_ids"`
 	Default    bool         `toml:"default"`
 	Features   PlanFeatures `toml:"features"`
 	Consumable bool         `toml:"consumable"`

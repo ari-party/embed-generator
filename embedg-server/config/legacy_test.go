@@ -36,6 +36,8 @@ premium:
         max_saved_messages: 25
     - id: premium_server
       sku_id: "123"
+      guild_ids:
+        - "987654321098765432"
       features:
         max_saved_messages: 100
 debug: true
@@ -72,6 +74,7 @@ func TestLegacyYAMLConfig(t *testing.T) {
 		t.Errorf("premium ids = %d, %d", cfg.Premium.BeneficialGuildID, cfg.Premium.BeneficialRoleID)
 	}
 	if len(cfg.Premium.Plans) != 2 || !cfg.Premium.Plans[0].Default || cfg.Premium.Plans[1].SKUID != "123" ||
+		len(cfg.Premium.Plans[1].GuildIDs) != 1 || cfg.Premium.Plans[1].GuildIDs[0] != "987654321098765432" ||
 		cfg.Premium.Plans[1].Features.MaxSavedMessages != 100 || cfg.Premium.Plans[0].Features.MaxSavedMessages != 25 {
 		t.Errorf("plans = %+v", cfg.Premium.Plans)
 	}
