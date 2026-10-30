@@ -1,71 +1,75 @@
-import { useMemo, useState } from "react";
-import {
-  useSendMessageToChannelMutation,
-  useSendMessageToWebhookMutation,
-} from "../api/mutations";
-import { useCurrentMessageStore } from "../state/message";
+import { useShallow } from "zustand/react/shallow";
+import { useSendMessageToWebhookMutation } from "../api/mutations";
 import { useValidationErrorStore } from "../state/validationError";
-import { ExclamationCircleIcon } from "@heroicons/react/20/solid";
 import { useCurrentAttachmentsStore } from "../state/attachments";
-import { useSendSettingsStore } from "../state/sendSettings";
-import { shallow } from "zustand/shallow";
-import { messageUrlRegex, parseWebhookUrl } from "../discord/util";
+import { useSendSettingsStore, useWebhookTarget } from "../state/sendSettings";
+import { parseMessageId } from "../discord/util";
+import {
+  FluxerComponentsNotice,
+  InteractiveWebhookNotice,
+} from "./WebhookNotice";
 import MessageRestoreButton from "./MessageRestoreButton";
+import Notice from "./Notice";
 import { useToasts } from "../util/toasts";
+import { getCurrentMessage } from "../state/currentMessage";
+import {
+  useHasComponents,
+  useHasInteractiveComponents,
+} from "../state/document";
 
 export default function SendMenuWebhook() {
   const validationError = useValidationErrorStore((state) =>
-    state.checkIssueByPathPrefix("")
+    state.hasAnyIssue(),
+  );
+  const interactive = useHasInteractiveComponents();
+  const hasComponents = useHasComponents();
+  const hasAttachments = useCurrentAttachmentsStore(
+    (state) => state.attachments.length > 0,
   );
 
   const [webhookUrl, setWebhookUrl] = useSendSettingsStore(
-    (state) => [state.webhookUrl, state.setWebhookUrl],
-    shallow
+    useShallow((state) => [state.webhookUrl, state.setWebhookUrl]),
   );
-  const webhookInfo = useMemo(() => {
-    if (!webhookUrl) return null;
-    return parseWebhookUrl(webhookUrl);
-  }, [webhookUrl]);
+  const target = useWebhookTarget();
+  const fluxer = target?.platform === "fluxer";
 
   const [messageId, setMessageId] = useSendSettingsStore(
-    (state) => [state.messageId, state.setMessageId],
-    shallow
+    useShallow((state) => [state.messageId, state.setMessageId]),
   );
   const [threadId, setThreadId] = useSendSettingsStore(
-    (state) => [state.threadId, state.setThreadId],
-    shallow
+    useShallow((state) => [state.threadId, state.setThreadId]),
   );
 
   const sendToWebhookMutation = useSendMessageToWebhookMutation();
 
-  function handleMessageId(val: string) {
-    if (!val) {
-      setMessageId(null);
-      return;
-    }
-
-    const match = val.match(messageUrlRegex);
-    if (match) {
-      setMessageId(match[2]);
-    } else {
-      setMessageId(val);
-    }
-  }
-
   const createToast = useToasts((state) => state.create);
 
+  // Used for both the styling and the disabled attribute of both buttons.
+  const canSend =
+    !validationError &&
+    !interactive &&
+    !(fluxer && hasComponents) &&
+    !!target &&
+    !sendToWebhookMutation.isPending;
+
   function send(edit: boolean) {
-    if (validationError || !webhookInfo) return;
+    if (!canSend) return;
+    // Already covered by the predicate, repeated so target narrows to non-null below.
+    if (!target) return;
 
     sendToWebhookMutation.mutate(
       {
-        webhook_type: webhookInfo.type,
-        webhook_id: webhookInfo.id,
-        webhook_token: webhookInfo.token,
+        webhook_platform: target.platform,
+        webhook_id: target.id,
+        webhook_token: target.token,
         message_id: edit ? messageId : null,
-        thread_id: threadId,
-        data: useCurrentMessageStore.getState(),
-        attachments: useCurrentAttachmentsStore.getState().attachments,
+        thread_id: target.threadId,
+        data: getCurrentMessage(),
+        // Fluxer's edits can't change the files.
+        attachments:
+          fluxer && edit
+            ? []
+            : useCurrentAttachmentsStore.getState().attachments,
       },
       {
         onSuccess: (resp) => {
@@ -84,7 +88,7 @@ export default function SendMenuWebhook() {
             });
           }
         },
-      }
+      },
     );
   }
 
@@ -92,89 +96,94 @@ export default function SendMenuWebhook() {
     <div className="space-y-5">
       <div className="flex">
         <div className="flex-auto">
-          <div className="uppercase text-gray-300 text-sm font-medium mb-1.5">
+          <div className="uppercase text-mist-300 text-sm font-medium mb-1.5">
             Webhook URL
           </div>
           <input
             type="url"
-            className="bg-dark-2 px-3 py-2 rounded w-full focus:outline-none text-white"
+            className="bg-ink-900 px-3 py-2 rounded-lg w-full focus:outline-none text-white"
             onChange={(e) => setWebhookUrl(e.target.value || null)}
             value={webhookUrl || ""}
           />
         </div>
       </div>
       <div className="flex space-x-3">
-        <div className="flex-auto">
-          <div className="uppercase text-gray-300 text-sm font-medium mb-1.5">
-            Thread ID
+        {!fluxer && (
+          <div className="flex-auto">
+            <div className="uppercase text-mist-300 text-sm font-medium mb-1.5">
+              Thread ID
+            </div>
+            <input
+              type="text"
+              className="bg-ink-900 px-3 py-2 rounded-lg w-full focus:outline-none text-white"
+              onChange={(e) => setThreadId(e.target.value || null)}
+              value={threadId ?? ""}
+            />
           </div>
-          <input
-            type="text"
-            className="bg-dark-2 px-3 py-2 rounded w-full focus:outline-none text-white"
-            onChange={(e) => setThreadId(e.target.value || null)}
-            value={threadId ?? ""}
-          />
-        </div>
+        )}
         <div className="flex-auto">
-          <div className="uppercase text-gray-300 text-sm font-medium mb-1.5">
+          <div className="uppercase text-mist-300 text-sm font-medium mb-1.5">
             Message ID or URL
           </div>
           <input
             type="text"
-            className="bg-dark-2 px-3 py-2 rounded w-full focus:outline-none text-white"
-            onChange={(e) => handleMessageId(e.target.value)}
+            className="bg-ink-900 px-3 py-2 rounded-lg w-full focus:outline-none text-white"
+            onChange={(e) => setMessageId(parseMessageId(e.target.value))}
             value={messageId ?? ""}
           />
         </div>
       </div>
-      <div className="text-orange-300 font-light">
-        Interactive components are only available when selecting a server and
-        channel instead of sending to a webhook.
-      </div>
+      {fluxer && hasComponents && <FluxerComponentsNotice />}
+      {!fluxer && interactive && <InteractiveWebhookNotice />}
+      {fluxer && messageId && hasAttachments && (
+        <div className="text-mist-400 font-light text-sm">
+          Editing a Fluxer message keeps the files it was sent with, as Fluxer
+          can't change them.
+        </div>
+      )}
       <div>
         {validationError && (
-          <div className="flex items-center text-red space-x-1">
-            <ExclamationCircleIcon className="h-5 w-5" />
-            <div>
-              There are errors in your message, you have to fix them before
-              sending the message.
-            </div>
-          </div>
+          <Notice tone="error">
+            There are errors in your message, you have to fix them before
+            sending the message.
+          </Notice>
         )}
       </div>
       <div className="flex justify-end flex-col space-y-2 md:flex-row md:space-y-0 md:space-x-2 items-end md:items-center">
         <MessageRestoreButton />
         <div className="flex items-center space-x-2">
           {messageId && (
-            <div
-              className={`px-3 py-2 rounded text-white flex items-center space-x-3 ${
-                validationError || !webhookInfo || webhookInfo.type != "discord"
-                  ? "cursor-not-allowed bg-dark-2"
-                  : "bg-blurple hover:bg-blurple-dark cursor-pointer"
+            <button
+              type="button"
+              className={`px-3 py-2 rounded-lg text-white flex items-center space-x-3 ${
+                canSend
+                  ? "bg-azure-500 hover:bg-azure-400 cursor-pointer"
+                  : "cursor-not-allowed bg-ink-900"
               }`}
-              role="button"
+              disabled={!canSend}
               onClick={() => send(true)}
             >
-              {sendToWebhookMutation.isLoading && (
+              {sendToWebhookMutation.isPending && (
                 <div className="h-2 w-2 bg-white rounded-full animate-ping"></div>
               )}
               <div>Edit Message</div>
-            </div>
+            </button>
           )}
-          <div
-            className={`px-3 py-2 rounded text-white flex items-center space-x-3 ${
-              validationError || !webhookInfo
-                ? "cursor-not-allowed bg-dark-2"
-                : "bg-blurple hover:bg-blurple-dark cursor-pointer"
+          <button
+            type="button"
+            className={`px-3 py-2 rounded-lg text-white flex items-center space-x-3 ${
+              canSend
+                ? "bg-azure-500 hover:bg-azure-400 cursor-pointer"
+                : "cursor-not-allowed bg-ink-900"
             }`}
-            role="button"
+            disabled={!canSend}
             onClick={() => send(false)}
           >
-            {sendToWebhookMutation.isLoading && (
+            {sendToWebhookMutation.isPending && (
               <div className="h-2 w-2 bg-white rounded-full animate-ping"></div>
             )}
             <div>Send Message</div>
-          </div>
+          </button>
         </div>
       </div>
     </div>

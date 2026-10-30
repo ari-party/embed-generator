@@ -8,15 +8,16 @@ import "./DateTimePicker.css";
 interface Props {
   value: string | undefined;
   onChange: (v: string | undefined) => void;
-  clearable: boolean;
 }
 
-export default function DateTimePicker({ value, onChange, clearable }: Props) {
+// In the browser's local time.
+export default function DateTimePicker({ value, onChange }: Props) {
   return (
     <ReactDateTimePicker
-      onChange={(v) => onChange(v?.toISOString())}
-      value={value}
-      clearIcon={clearable ? undefined : null}
+      onChange={(v) =>
+        onChange(v instanceof Date ? v.toISOString() : undefined)
+      }
+      value={value ? new Date(value) : null}
     />
   );
 }

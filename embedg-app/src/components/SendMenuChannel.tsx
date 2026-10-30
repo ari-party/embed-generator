@@ -1,42 +1,37 @@
-import { useState } from "react";
+import { useShallow } from "zustand/react/shallow";
 import { useSendMessageToChannelMutation } from "../api/mutations";
 import { useGuildChannelsQuery, useUserQuery } from "../api/queries";
-import { useCurrentMessageStore } from "../state/message";
 import { ChannelSelect } from "./ChannelSelect";
 import GuildSelect from "./GuildSelect";
 import LoginSuggest from "./LoginSuggest";
 import { useValidationErrorStore } from "../state/validationError";
-import { ExclamationCircleIcon } from "@heroicons/react/20/solid";
 import { useCurrentAttachmentsStore } from "../state/attachments";
 import { useSendSettingsStore } from "../state/sendSettings";
-import { shallow } from "zustand/shallow";
-import { messageUrlRegex } from "../discord/util";
+import { isThreadOnlyChannel, parseMessageId } from "../discord/util";
 import MessageRestoreButton from "./MessageRestoreButton";
+import Notice from "./Notice";
 import { useToasts } from "../util/toasts";
+import { getCurrentMessage } from "../state/currentMessage";
 
 export default function SendMenuChannel() {
   const validationError = useValidationErrorStore((state) =>
-    state.checkIssueByPathPrefix("")
+    state.hasAnyIssue(),
   );
 
   const [selectedGuildId, setSelectedGuildId] = useSendSettingsStore(
-    (state) => [state.guildId, state.setGuildId],
-    shallow
+    useShallow((state) => [state.guildId, state.setGuildId]),
   );
 
   const [selectedChannnelId, setSelectedChannelId] = useSendSettingsStore(
-    (state) => [state.channelId, state.setChannelId],
-    shallow
+    useShallow((state) => [state.channelId, state.setChannelId]),
   );
 
   const [messageId, setMessageId] = useSendSettingsStore(
-    (state) => [state.messageId, state.setMessageId],
-    shallow
+    useShallow((state) => [state.messageId, state.setMessageId]),
   );
 
   const [threadName, setThreadName] = useSendSettingsStore(
-    (state) => [state.threadName, state.setThreadName],
-    shallow
+    useShallow((state) => [state.threadName, state.setThreadName]),
   );
 
   const { data: channels } = useGuildChannelsQuery(selectedGuildId);
@@ -48,40 +43,31 @@ export default function SendMenuChannel() {
 
   const sendToChannelMutation = useSendMessageToChannelMutation();
 
-  function handleMessageId(val: string) {
-    if (!val) {
-      setMessageId(null);
-      return;
-    }
-
-    const match = val.match(messageUrlRegex);
-    if (match) {
-      setMessageId(match[2]);
-    } else {
-      setMessageId(val);
-    }
-  }
-
   const createToast = useToasts((state) => state.create);
 
+  // One predicate per button, used for both the styling and the disabled attribute. A forum or
+  // media channel needs a thread name, and can't have an existing message edited in it.
+  const threadOnly = isThreadOnlyChannel(selectedChannel?.type);
+  const ready =
+    !validationError &&
+    !!selectedGuildId &&
+    !!selectedChannnelId &&
+    !sendToChannelMutation.isPending;
+  const canSend = ready && !(threadOnly && !threadName);
+  const canEdit = ready && !threadOnly;
+
   function send(edit: boolean) {
-    if (validationError) return;
-
-    if (!selectedGuildId || !selectedChannnelId) {
-      return;
-    }
-
-    if (edit && selectedChannel?.type === 15) {
-      return;
-    }
+    if (edit ? !canEdit : !canSend) return;
+    // Already covered by the predicate, repeated so the ids narrow to non-null below.
+    if (!selectedGuildId || !selectedChannnelId) return;
 
     sendToChannelMutation.mutate(
       {
         guild_id: selectedGuildId,
         channel_id: selectedChannnelId,
-        thread_name: selectedChannel?.type === 15 ? threadName : null,
+        thread_name: threadOnly ? threadName : null,
         message_id: edit ? messageId : null,
-        data: useCurrentMessageStore.getState(),
+        data: getCurrentMessage(),
         attachments: useCurrentAttachmentsStore.getState().attachments,
       },
       {
@@ -101,15 +87,15 @@ export default function SendMenuChannel() {
             });
           }
         },
-      }
+      },
     );
   }
 
-  return !!user?.success ? (
+  return user?.success ? (
     <div className="space-y-5">
       <div className="flex">
         <div className="flex-auto">
-          <div className="uppercase text-gray-300 text-sm font-medium mb-1.5">
+          <div className="uppercase text-mist-300 text-sm font-medium mb-1.5">
             Server
           </div>
           <GuildSelect
@@ -120,7 +106,7 @@ export default function SendMenuChannel() {
       </div>
       <div className="flex flex-col sm:flex-row space-y-3 sm:space-y-0 sm:space-x-3">
         <div className="flex-auto sm:w-1/2">
-          <div className="uppercase text-gray-300 text-sm font-medium mb-1.5">
+          <div className="uppercase text-mist-300 text-sm font-medium mb-1.5">
             Channel
           </div>
           <ChannelSelect
@@ -130,87 +116,86 @@ export default function SendMenuChannel() {
           />
         </div>
 
-        {selectedChannel?.type === 15 ? (
+        {threadOnly ? (
           <div className="flex-auto sm:w-1/2">
             <div className="flex-auto">
-              <div className="uppercase text-gray-300 text-sm font-medium mb-1.5">
+              <div className="uppercase text-mist-300 text-sm font-medium mb-1.5">
                 Thread Name
               </div>
               <input
                 type="text"
                 maxLength={100}
-                className="bg-dark-2 px-3 py-2 rounded w-full focus:outline-none text-white"
+                className="bg-ink-900 px-3 py-2 rounded-lg w-full focus:outline-none text-white"
                 value={threadName ?? ""}
                 onChange={(e) => setThreadName(e.target.value || null)}
               />
-              <div className="mt-2 text-gray-400 text-sm font-light">
-                When sending to a Forum Channel you have to set a name for the
-                thread that is being created.
+              <div className="mt-2 text-mist-400 text-sm font-light">
+                When sending to a forum or media channel you have to set a name
+                for the thread that is being created.
               </div>
             </div>
           </div>
         ) : (
           <div className="flex-auto sm:w-1/2">
-            <div className="uppercase text-gray-300 text-sm font-medium mb-1.5">
+            <div className="uppercase text-mist-300 text-sm font-medium mb-1.5">
               Message ID or URL
             </div>
             <input
               type="text"
-              className="bg-dark-2 px-3 py-2 rounded w-full focus:outline-none text-white"
+              className="bg-ink-900 px-3 py-2 rounded-lg w-full focus:outline-none text-white"
               value={messageId ?? ""}
-              onChange={(e) => handleMessageId(e.target.value)}
+              onChange={(e) => setMessageId(parseMessageId(e.target.value))}
             />
           </div>
         )}
       </div>
       <div>
         {validationError && (
-          <div className="flex items-center text-red space-x-1">
-            <ExclamationCircleIcon className="h-5 w-5 flex-none" />
-            <div>
-              There are errors in your message, you have to fix them before
-              sending the message.
-            </div>
-          </div>
+          <Notice tone="error">
+            There are errors in your message, you have to fix them before
+            sending the message.
+          </Notice>
         )}
       </div>
       <div className="flex justify-end flex-col space-y-2 md:flex-row md:space-y-0 md:space-x-2 items-end md:items-center">
         <MessageRestoreButton />
         <div className="flex items-center space-x-2">
           {messageId && (
-            <div
-              className={`px-3 py-2 rounded text-white flex items-center space-x-3 ${
-                validationError ||
-                !selectedChannnelId ||
-                selectedChannel?.type === 15
-                  ? "cursor-not-allowed bg-dark-2"
-                  : "bg-blurple hover:bg-blurple-dark cursor-pointer"
+            <button
+              type="button"
+              className={`px-3 py-2 rounded-lg text-white flex items-center space-x-3 ${
+                canEdit
+                  ? "bg-azure-500 hover:bg-azure-400 cursor-pointer"
+                  : "cursor-not-allowed bg-ink-900"
               }`}
-              role="button"
+              disabled={!!validationError || !selectedChannnelId || threadOnly}
               onClick={() => send(true)}
             >
-              {sendToChannelMutation.isLoading && (
+              {sendToChannelMutation.isPending && (
                 <div className="h-2 w-2 bg-white rounded-full animate-ping"></div>
               )}
               <div>Edit Message</div>
-            </div>
+            </button>
           )}
-          <div
-            className={`px-3 py-2 rounded text-white flex items-center space-x-3 ${
-              validationError ||
-              !selectedChannnelId ||
-              (selectedChannel?.type === 15 && !threadName)
-                ? "cursor-not-allowed bg-dark-2"
-                : "bg-blurple hover:bg-blurple-dark cursor-pointer"
+          <button
+            type="button"
+            className={`px-3 py-2 rounded-lg text-white flex items-center space-x-3 ${
+              canSend
+                ? "bg-azure-500 hover:bg-azure-400 cursor-pointer"
+                : "cursor-not-allowed bg-ink-900"
             }`}
-            role="button"
+            disabled={
+              !!validationError ||
+              !selectedChannnelId ||
+              (threadOnly && !threadName)
+            }
             onClick={() => send(false)}
           >
-            {sendToChannelMutation.isLoading && (
+            {sendToChannelMutation.isPending && (
               <div className="h-2 w-2 bg-white rounded-full animate-ping"></div>
             )}
             <div>Send Message</div>
-          </div>
+          </button>
         </div>
       </div>
     </div>

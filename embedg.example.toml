@@ -1,0 +1,122 @@
+[discord]
+client_id = ""
+client_secret = ""
+public_key = "" # only needed for an HTTP interactions endpoint (optional)
+token = ""
+
+# 0 asks Discord how many shards this bot needs and how many may identify at once, which is what
+# you want unless you run several instances. Lowering identify_concurrency below what Discord
+# grants spreads the guild burst at startup, worth doing if the process can't keep up coming up.
+shard_count = 0
+identify_concurrency = 0
+
+[openai]
+api_key = "" # for the AI assistant (optional)
+
+# The AI assistant. Plans set how many prompts it takes a month with max_ai_prompts_per_month.
+[assistant]
+model = "gpt-5-mini"
+reasoning_effort = "low"
+max_output_tokens = 16000 # per model call, reasoning included
+max_repairs = 2 # fixes of its own mistakes that don't count as prompts
+
+[database.postgres]
+host = "localhost"
+port = 5432
+db_name = "embedg"
+user = "postgres"
+password = ""
+
+# Matches the MinIO root user in docker-compose.yaml
+[database.s3]
+endpoint = "localhost:9000"
+access_key_id = "embedg"
+secret_access_key = "1234567890"
+
+[app]
+public_url = "http://localhost:5173/app"
+
+[api]
+# Make sure to add {public_url}/auth/callback to the OAuth2 Redirect URLs of your application in the Discord dev portal
+public_url = "http://localhost:5173/api"
+
+# Make sure to enable this when you don't have an SSL (HTTPS) certificate
+insecure_cookies = true
+
+host = "localhost"
+port = 8080
+
+[cdn]
+public_url = "http://localhost:8080/cdn"
+
+# These links are used in help commands and for redirects
+[links]
+discord = "https://discord.gg/CpHwbKQKHA"
+source = "https://github.com/merlinfuchs/embed-generator"
+
+[logging]
+debug = false
+
+# Here you can configure multiple tiers/plans which are linked to a Discord SKU
+# List the paid plans from the cheapest to the most expensive. The app offers the named ones as upgrades
+# The default plan that all users automatically have
+[[premium.plans]]
+id = "default"
+default = true
+
+[premium.plans.features]
+max_saved_messages = 25
+max_saved_message_versions = 5
+max_actions_per_component = 3
+# Lets actions respond with a message built in the action instead of a saved message
+advanced_action_types = false
+max_ai_prompts_per_month = 5
+is_premium = false
+custom_bot = false
+max_custom_commands = 0
+max_scheduled_messages = 5
+periodic_scheduled_messages = false
+max_template_ops = 1000
+max_kv_keys = 10
+
+# An additional premium plan that will apply when the user or guild has the SKU
+[[premium.plans]]
+id = "premium_server"
+name = "Premium"
+sku_id = "123"
+
+[premium.plans.features]
+max_saved_messages = 100
+max_saved_message_versions = 25
+max_actions_per_component = 10
+advanced_action_types = true
+max_ai_prompts_per_month = 100
+is_premium = true # This is used for handing out cosmetics like a role on the support server
+custom_bot = true
+max_custom_commands = 25
+max_image_upload_size = 8000000
+max_scheduled_messages = 25
+periodic_scheduled_messages = true
+max_template_ops = 10000
+max_kv_keys = 1000
+
+# A higher plan on top of premium. Features are merged, so each limit is the highest of all plans the user or guild has
+[[premium.plans]]
+id = "ultimate_server"
+name = "Ultimate"
+sku_id = "456"
+
+[premium.plans.features]
+max_saved_messages = 500
+max_saved_message_versions = 50
+max_actions_per_component = 20
+advanced_action_types = true
+max_ai_prompts_per_month = 250
+is_premium = true
+custom_bot = true
+max_custom_commands = 50
+max_image_upload_size = 8000000
+max_scheduled_messages = 100
+periodic_scheduled_messages = true
+max_template_ops = 10000
+max_kv_keys = 5000

@@ -1,42 +1,135 @@
 package actions
 
 import (
+	"encoding/json"
+	"errors"
+	"fmt"
+	"reflect"
 	"slices"
+	"strings"
+	"time"
+	"unicode"
 
-	"github.com/merlinfuchs/discordgo"
+	"github.com/disgoorg/disgo/discord"
+	"github.com/merlinfuchs/embed-generator/embedg-server/common"
 )
 
 type MessageWithActions struct {
-	Content         string                            `json:"content,omitempty"`
-	Username        string                            `json:"username,omitempty"`
-	AvatarURL       string                            `json:"avatar_url,omitempty"`
-	TTS             bool                              `json:"tts,omitempty"`
-	Embeds          []*discordgo.MessageEmbed         `json:"embeds,omitempty"`
-	AllowedMentions *discordgo.MessageAllowedMentions `json:"allowed_mentions,omitempty"`
-	Components      []ComponentWithActions            `json:"components,omitempty"`
-	Actions         map[string]ActionSet              `json:"actions,omitempty"`
-	Flags           discordgo.MessageFlags            `json:"flags,omitempty"`
+	Content         string                   `json:"content,omitempty"`
+	Username        string                   `json:"username,omitempty"`
+	AvatarURL       string                   `json:"avatar_url,omitempty"`
+	TTS             bool                     `json:"tts,omitempty"`
+	Embeds          []discord.Embed          `json:"embeds,omitempty"`
+	AllowedMentions *discord.AllowedMentions `json:"allowed_mentions,omitempty"`
+	Components      []ComponentWithActions   `json:"components,omitempty"`
+	Actions         map[string]ActionSet     `json:"actions,omitempty"`
+	Flags           discord.MessageFlags     `json:"flags,omitempty"`
+}
+
+// UnmarshalJSON reads embed timestamps itself. Imported and older saved messages carry
+// "timestamp": "" for an embed without one, which time.Time rejects; anything else that
+// isn't a date is still an error.
+//
+// It also drops the suppress embeds flag, which hides every embed in the message. Drafts restored
+// from a message whose link preview was hidden in Discord carry it without the user knowing.
+func (m *MessageWithActions) UnmarshalJSON(data []byte) error {
+	type message MessageWithActions
+	var raw struct {
+		message
+		Embeds []struct {
+			discord.Embed
+			Timestamp string `json:"timestamp"`
+		} `json:"embeds"`
+	}
+	if err := json.Unmarshal(data, &raw); err != nil {
+		return decodeError(err)
+	}
+
+	*m = MessageWithActions(raw.message)
+	m.Flags &^= discord.MessageFlagSuppressEmbeds
+	m.Embeds = nil
+	if raw.Embeds != nil {
+		m.Embeds = make([]discord.Embed, 0, len(raw.Embeds))
+	}
+	for i, e := range raw.Embeds {
+		embed := e.Embed
+		if e.Timestamp != "" {
+			t, err := time.Parse(time.RFC3339, e.Timestamp)
+			if err != nil {
+				return fmt.Errorf("embed %d has an invalid timestamp %q", i+1, e.Timestamp)
+			}
+			embed.Timestamp = &t
+		}
+		m.Embeds = append(m.Embeds, embed)
+	}
+	return nil
+}
+
+// decodeError describes a value of the wrong type by its path in the message JSON, without the Go
+// type and struct names encoding/json reports, which mean nothing to whoever wrote the message.
+func decodeError(err error) error {
+	var typeErr *json.UnmarshalTypeError
+	if !errors.As(err, &typeErr) {
+		return err
+	}
+
+	var path []string
+	for _, part := range strings.Split(typeErr.Field, ".") {
+		// Embedded structs show up by their type name, the decoder's own wrapper as "message".
+		if part == "" || part == "message" || unicode.IsUpper(rune(part[0])) {
+			continue
+		}
+		path = append(path, part)
+	}
+	if len(path) == 0 {
+		return fmt.Errorf("the message must be a JSON object, got %s", typeErr.Value)
+	}
+
+	var want string
+	switch typeErr.Type.Kind() {
+	case reflect.String:
+		want = "text"
+	case reflect.Bool:
+		want = "true or false"
+	case reflect.Int, reflect.Int8, reflect.Int16, reflect.Int32, reflect.Int64,
+		reflect.Uint, reflect.Uint8, reflect.Uint16, reflect.Uint32, reflect.Uint64,
+		reflect.Float32, reflect.Float64:
+		want = "a number"
+	case reflect.Slice, reflect.Array:
+		want = "a list"
+	default:
+		want = "an object"
+	}
+	return fmt.Errorf("%s must be %s, got %s", strings.Join(path, "."), want, typeErr.Value)
 }
 
 func (m MessageWithActions) ComponentsV2Enabled() bool {
 	return m.Flags&(1<<15) != 0
 }
 
+// EditFlags are the flags to edit a message with. They turn it into a Components V2 one, which
+// Discord needs to be told on edits too. Sending them either way also shows embeds that were hidden
+// in Discord, which an edit without flags leaves hidden.
+func (m MessageWithActions) EditFlags() *discord.MessageFlags {
+	flags := m.Flags & discord.MessageFlagIsComponentsV2
+	return &flags
+}
+
 type ComponentWithActions struct {
-	ID       int                     `json:"id,omitempty"`
-	Type     discordgo.ComponentType `json:"type"`
-	Disabled bool                    `json:"disabled,omitempty"`
-	Spoiler  bool                    `json:"spoiler,omitempty"`
+	ID       int                   `json:"id,omitempty"`
+	Type     discord.ComponentType `json:"type"`
+	Disabled bool                  `json:"disabled,omitempty"`
+	Spoiler  bool                  `json:"spoiler,omitempty"`
 
 	// Action Row & Section & Container
 	Components []ComponentWithActions `json:"components,omitempty"`
 
 	// Button
-	Style       discordgo.ButtonStyle     `json:"style,omitempty"`
-	Label       string                    `json:"label,omitempty"`
-	Emoji       *discordgo.ComponentEmoji `json:"emoji,omitempty"`
-	URL         string                    `json:"url,omitempty"`
-	ActionSetID string                    `json:"action_set_id,omitempty"`
+	Style       discord.ButtonStyle     `json:"style,omitempty"`
+	Label       string                  `json:"label,omitempty"`
+	Emoji       *discord.ComponentEmoji `json:"emoji,omitempty"`
+	URL         string                  `json:"url,omitempty"`
+	ActionSetID string                  `json:"action_set_id,omitempty"`
 
 	// Select Menu
 	Placeholder string                             `json:"placeholder,omitempty"`
@@ -61,11 +154,22 @@ type ComponentWithActions struct {
 	File *UnfurledMediaItem `json:"file,omitempty"`
 
 	// Separator
-	Divider bool `json:"divider,omitempty"`
-	Spacing int  `json:"spacing,omitempty"`
+	Divider *bool `json:"divider,omitempty"`
+	Spacing int   `json:"spacing,omitempty"`
 
 	// Container
 	AccentColor int `json:"accent_color,omitempty"`
+}
+
+// Interactive is whether the component needs the bot to handle it, unlike a link button.
+func (c ComponentWithActions) Interactive() bool {
+	switch c.Type {
+	case discord.ComponentTypeButton:
+		return c.Style != discord.ButtonStyleLink
+	case discord.ComponentTypeStringSelectMenu:
+		return true
+	}
+	return false
 }
 
 type UnfurledMediaItem struct {
@@ -73,11 +177,11 @@ type UnfurledMediaItem struct {
 }
 
 type ComponentSelectOptionWithActions struct {
-	Label       string                    `json:"label"`
-	Description string                    `json:"description"`
-	Emoji       *discordgo.ComponentEmoji `json:"emoji"`
-	Default     bool                      `json:"default"`
-	ActionSetID string                    `json:"action_set_id"`
+	Label       string                  `json:"label"`
+	Description string                  `json:"description"`
+	Emoji       *discord.ComponentEmoji `json:"emoji"`
+	Default     bool                    `json:"default"`
+	ActionSetID string                  `json:"action_set_id"`
 }
 
 type ComponentMediaGalleryItem struct {
@@ -99,17 +203,23 @@ const (
 	ActionTypeTextEdit             ActionType = 8
 	ActionTypeSavedMessageEdit     ActionType = 9
 	ActionTypePermissionCheck      ActionType = 10
+	ActionTypeTextChannel          ActionType = 11
+	ActionTypeSavedMessageChannel  ActionType = 12
 )
 
 type Action struct {
 	Type                   ActionType `json:"type"`
 	TargetID               string     `json:"target_id"`
+	ChannelID              string     `json:"channel_id"`
 	Text                   string     `json:"text"`
 	Public                 bool       `json:"public"`
 	AllowRoleMentions      bool       `json:"allow_role_mentions"`
 	DisableDefaultResponse bool       `json:"disable_default_response"`
 	Permissions            string     `json:"permissions"`
 	RoleIDs                []string   `json:"role_ids"`
+	// Message is what the saved message types respond with when the action carries the message
+	// itself instead of naming a saved message in TargetID.
+	Message *MessageWithActions `json:"message,omitempty"`
 }
 
 type ActionSet struct {
@@ -117,25 +227,33 @@ type ActionSet struct {
 }
 
 type ActionDerivedPermissions struct {
-	UserID             string   `json:"user_id"`
-	GuildIsOwner       bool     `json:"guild_is_owner"`
-	GuildPermissions   int64    `json:"guild_permissions"`
-	ChannelPermissions int64    `json:"channel_permissions"`
-	AllowedRoleIDs     []string `json:"lower_role_ids"`
+	UserID             common.ID   `json:"user_id"`
+	GuildIsOwner       bool        `json:"guild_is_owner"`
+	GuildPermissions   uint64      `json:"guild_permissions"`
+	ChannelPermissions uint64      `json:"channel_permissions"`
+	AllowedRoleIDs     []common.ID `json:"lower_role_ids"`
 }
 
-func (a *ActionDerivedPermissions) HasChannelPermission(permission int64) bool {
-	return a.GuildIsOwner || (a.GuildPermissions&discordgo.PermissionAdministrator) != 0 || (a.ChannelPermissions&permission) != 0
+func (a *ActionDerivedPermissions) HasChannelPermission(permission discord.Permissions) bool {
+	perms := discord.Permissions(a.ChannelPermissions)
+	return a.GuildIsOwner || perms.Has(discord.PermissionAdministrator) || perms.Has(permission)
 }
 
-func (a *ActionDerivedPermissions) HasGuildPermission(permission int64) bool {
-	return a.GuildIsOwner || (a.GuildPermissions&discordgo.PermissionAdministrator) != 0 || (a.GuildPermissions&permission) != 0
+func (a *ActionDerivedPermissions) HasGuildPermission(permission discord.Permissions) bool {
+	perms := discord.Permissions(a.GuildPermissions)
+	return a.GuildIsOwner || perms.Has(discord.PermissionAdministrator) || perms.Has(permission)
 }
 
-func (a *ActionDerivedPermissions) CanManageRole(roleID string) bool {
+func (a *ActionDerivedPermissions) CanManageRole(roleID common.ID) bool {
 	if a.GuildIsOwner {
 		return true
 	}
 
-	return a.HasGuildPermission(discordgo.PermissionManageRoles) && slices.Contains(a.AllowedRoleIDs, roleID)
+	return a.HasGuildPermission(discord.PermissionManageRoles) && slices.Contains(a.AllowedRoleIDs, roleID)
+}
+
+// CanSendToOtherChannels reports whether the creator may make actions send messages to other
+// channels. Only server level permissions count, so a channel overwrite can't grant or take it away.
+func (a *ActionDerivedPermissions) CanSendToOtherChannels() bool {
+	return a.HasGuildPermission(discord.PermissionManageWebhooks)
 }

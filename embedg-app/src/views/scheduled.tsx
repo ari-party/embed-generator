@@ -5,13 +5,22 @@ import { usePremiumGuildFeatures } from "../util/premium";
 import ScheduledMessage from "../components/ScheduledMessage";
 import ScheduledMessageCreate from "../components/ScheduledMessageCreate";
 import { useMemo, useState } from "react";
-import clsx from "clsx";
 import { AutoAnimate } from "../util/autoAnimate";
+import LimitButton from "../components/LimitButton";
+import ScheduledMessagesCalendar from "../components/ScheduledMessagesCalendar";
+import SegmentedControl from "../components/SegmentedControl";
+import clsx from "clsx";
 
 export default function ScheduledMessagesView() {
   const { data: user } = useUserQuery();
 
-  const [create, setCreate] = useState(false);
+  // A new message, on the day it was started on in the calendar.
+  const [create, setCreate] = useState<
+    false | { day?: string; timezone?: string }
+  >(false);
+  const [tab, setTab] = useState<"list" | "calendar">("list");
+  // The message to open, picked in the calendar.
+  const [focusId, setFocusId] = useState<string | null>(null);
 
   const guildId = useSendSettingsStore((s) => s.guildId);
 
@@ -19,6 +28,7 @@ export default function ScheduledMessagesView() {
   const messageCount = messagesQuery.data?.success
     ? messagesQuery.data.data.length
     : 0;
+  const showCalendar = tab === "calendar" && messageCount !== 0;
 
   const guildFeatures = usePremiumGuildFeatures(guildId);
   const maxMessages = guildFeatures?.max_scheduled_messages || 0;
@@ -35,11 +45,11 @@ export default function ScheduledMessagesView() {
         <div className="mb-10">
           <div className="text-white font-medium mb-3 flex items-center space-x-3">
             <div className="text-2xl">Scheduled Messages</div>
-            <div className="font-light italic text-gray-400 flex-none">
+            <div className="font-light italic text-mist-400 flex-none">
               {messageCount} / {maxMessages}
             </div>
           </div>
-          <div className="text-gray-400 font-light text-sm">
+          <div className="text-mist-400 font-light text-sm">
             You can create scheduled messages to send a message at a specific
             time and date or periodically. This can be useful for announcements,
             reminders and a lot more.
@@ -47,29 +57,75 @@ export default function ScheduledMessagesView() {
         </div>
         {user?.success ? (
           <div className="space-y-5 mb-8">
-            <AutoAnimate className="space-y-5 overlfow-y-auto">
+            {messageCount !== 0 && (
+              <SegmentedControl
+                options={[
+                  { value: "list", label: "List" },
+                  { value: "calendar", label: "Calendar" },
+                ]}
+                value={tab}
+                onChange={(t) => {
+                  setTab(t);
+                  // Opened once, not again every time the list comes back.
+                  setFocusId(null);
+                }}
+              />
+            )}
+            {showCalendar && (
+              <ScheduledMessagesCalendar
+                guildId={guildId}
+                messages={messages}
+                onOpen={(id) => {
+                  setTab("list");
+                  setFocusId(id);
+                }}
+                onCreate={
+                  messageCount < maxMessages
+                    ? (day, timezone) => {
+                        setTab("list");
+                        setCreate({ day, timezone });
+                      }
+                    : undefined
+                }
+              />
+            )}
+            {/* Hidden instead of unmounted, an open form keeps its edits while the calendar shows. */}
+            <AutoAnimate
+              className={clsx(
+                "space-y-5 overflow-y-auto",
+                showCalendar && "hidden",
+              )}
+            >
               {messages.map((msg) => (
-                <ScheduledMessage msg={msg} key={msg.id} />
+                <ScheduledMessage
+                  msg={msg}
+                  key={msg.id}
+                  focused={focusId === msg.id}
+                />
               ))}
               {(messageCount === 0 || create) && (
                 <ScheduledMessageCreate
-                  setCreate={setCreate}
+                  // A day picked in the calendar starts the form over on it.
+                  key={create ? `${create.day}:${create.timezone}` : undefined}
+                  initial={create || undefined}
+                  setCreate={(b) => setCreate(b && {})}
                   cancelable={messageCount !== 0}
                 />
               )}
             </AutoAnimate>
             <div className="flex space-x-3 justify-end">
-              <button
-                className={clsx(
-                  "px-3 py-2 rounded border-2 text-white",
-                  messageCount < maxMessages
-                    ? "border-dark-7 hover:bg-dark-6 cursor-pointer"
-                    : "border-dark-6 text-gray-300 cursor-not-allowed"
-                )}
-                onClick={() => messageCount < maxMessages && setCreate(true)}
+              <LimitButton
+                limit="max_scheduled_messages"
+                features={guildFeatures}
+                count={messageCount}
+                className="px-3 py-2 rounded-lg border-2 border-white/15 hover:bg-white/5 hover:border-white/30 cursor-pointer"
+                onClick={() => {
+                  setTab("list");
+                  setCreate(create || {});
+                }}
               >
                 New Scheduled Message
-              </button>
+              </LimitButton>
             </div>
           </div>
         ) : (

@@ -4,88 +4,76 @@ import (
 	"bytes"
 	"crypto/ed25519"
 	"encoding/hex"
-	"strings"
-	"time"
+	"log/slog"
 
+	"github.com/disgoorg/disgo/discord"
+	"github.com/disgoorg/disgo/events"
+	"github.com/disgoorg/disgo/rest"
 	"github.com/gofiber/fiber/v2"
-	"github.com/merlinfuchs/discordgo"
-	"github.com/merlinfuchs/embed-generator/embedg-server/actions/handler"
-	"github.com/merlinfuchs/embed-generator/embedg-server/api/helpers"
-	"github.com/merlinfuchs/embed-generator/embedg-server/bot"
-	"github.com/rs/zerolog/log"
-	"github.com/spf13/viper"
+	"github.com/merlinfuchs/embed-generator/embedg-server/api/handlers"
+	"github.com/merlinfuchs/embed-generator/embedg-server/store"
 )
 
-type InteractionHandler struct {
-	bot *bot.Bot
+type InteractionHandlerConfig struct {
+	DiscordPublicKey string
 }
 
-func New(bot *bot.Bot) *InteractionHandler {
+type InteractionHandler struct {
+	config     InteractionHandlerConfig
+	dispatcher store.EventDispatcher
+	rest       rest.Rest
+}
+
+func New(config InteractionHandlerConfig, dispatcher store.EventDispatcher, rest rest.Rest) *InteractionHandler {
 	return &InteractionHandler{
-		bot: bot,
+		config:     config,
+		dispatcher: dispatcher,
+		rest:       rest,
 	}
 }
 
 func (h *InteractionHandler) HandleBotInteraction(c *fiber.Ctx) error {
-	publicKey := viper.GetString("discord.public_key")
-
-	if !verifyInteractionSignaure(c, publicKey) {
-		return helpers.Unauthorized("invalid_signature", "Invalid signature")
+	if !verifyInteractionSignaure(c, h.config.DiscordPublicKey) {
+		return handlers.Unauthorized("invalid_signature", "Invalid signature")
 	}
 
-	interaction := &discordgo.InteractionCreate{}
-	err := c.BodyParser(interaction)
+	interaction, err := discord.UnmarshalInteraction(c.Body())
 	if err != nil {
 		return err
 	}
 
-	if interaction.Type == discordgo.InteractionPing {
-		return c.JSON(discordgo.InteractionResponse{
-			Type: discordgo.InteractionResponsePong,
+	if interaction.Type() == discord.InteractionTypePing {
+		return c.JSON(discord.InteractionResponse{
+			Type: discord.InteractionResponseTypePong,
 		})
 	}
 
-	customAction := false
-	switch interaction.Type {
-	case discordgo.InteractionMessageComponent:
-		data := interaction.MessageComponentData()
-		if strings.HasPrefix(data.CustomID, "action:") {
-			customAction = true
-		}
-	}
-
-	respCh := make(chan *discordgo.InteractionResponse)
-
-	ri := &handler.RestInteraction{
-		Inner:           interaction.Interaction,
-		Session:         h.bot.Session,
-		InitialResponse: respCh,
-	}
+	responder := handlers.NewInteractionResponder()
 
 	go func() {
-		if customAction {
-			err := h.bot.ActionHandler.HandleActionInteraction(h.bot.Session, ri)
-			if err != nil {
-				log.Error().Err(err).Msg("Failed to handle action interaction")
+		// Nothing above this recovers, and any guild member can trigger an interaction.
+		defer func() {
+			if r := recover(); r != nil {
+				slog.Error(
+					"Panic while handling bot interaction",
+					slog.Any("panic", r),
+				)
 			}
-		} else {
-			h.bot.HandlerInteraction(h.bot.Session, ri, interaction.Interaction.Data)
-		}
+		}()
+
+		h.dispatcher.DispatchEvent(&events.InteractionCreate{
+			GenericEvent: h.dispatcher.GenericEvent(),
+			Interaction:  interaction,
+			Respond:      responder.Respond,
+		})
 	}()
 
-	select {
-	case resp := <-respCh:
-		return c.JSON(resp)
-	case <-c.Context().Done():
-		return c.SendStatus(fiber.StatusNoContent)
-	case <-time.After(3 * time.Second):
-		return c.SendStatus(fiber.StatusInternalServerError)
-	}
+	return responder.Wait(c)
 }
 
 func verifyInteractionSignaure(c *fiber.Ctx, publicKey string) bool {
 	key, err := hex.DecodeString(publicKey)
-	if err != nil {
+	if err != nil || len(key) != ed25519.PublicKeySize {
 		return false
 	}
 

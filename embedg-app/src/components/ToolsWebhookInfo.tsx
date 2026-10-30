@@ -1,5 +1,6 @@
 import { useState } from "react";
-import { userAvatarUrl } from "../discord/cdn";
+import { fluxerAvatarUrl, userAvatarUrl } from "../discord/cdn";
+import { parseWebhookUrl } from "../discord/util";
 
 interface Webhook {
   application_id: string | null;
@@ -22,6 +23,7 @@ interface Webhook {
 export default function ToolsWebhookInfo() {
   const [webhookUrl, setWebhookUrl] = useState("");
   const [webhookInfo, setWebhookInfo] = useState<Webhook>();
+  const [fluxer, setFluxer] = useState(false);
   const [error, setError] = useState<string>();
 
   function getWebhookInfo() {
@@ -29,12 +31,13 @@ export default function ToolsWebhookInfo() {
 
     setWebhookInfo(undefined);
     setError(undefined);
+    setFluxer(parseWebhookUrl(webhookUrl)?.platform === "fluxer");
 
     fetch(webhookUrl)
       .then((res) => {
         if (!res.ok)
           throw new Error(
-            "Failed to get Webhook, does the webhook still exist?"
+            "Failed to get Webhook, does the webhook still exist?",
           );
         return res.json();
       })
@@ -42,18 +45,28 @@ export default function ToolsWebhookInfo() {
       .catch((err) => setError(`${err}`));
   }
 
+  const avatarUrl =
+    webhookInfo &&
+    (fluxer
+      ? fluxerAvatarUrl(webhookInfo)
+      : userAvatarUrl({
+          id: webhookInfo.id,
+          avatar: webhookInfo.avatar,
+          discriminator: "0",
+        }));
+
   return (
     <div className="space-y-5">
       <div className="flex space-x-3">
         <input
           type="url"
-          className="bg-dark-2 rounded px-3 py-2 w-full focus:outline-none text-gray-100 placeholder:font-light placeholder-gray-500"
-          placeholder="https://discord.com/api/webhooks/..."
+          className="bg-ink-900 rounded-lg px-3 py-2 w-full focus:outline-none text-mist-100 placeholder:font-light placeholder-mist-500"
+          placeholder="https://discord.com/api/webhooks/... or https://api.fluxer.app/webhooks/..."
           value={webhookUrl}
           onChange={(e) => setWebhookUrl(e.target.value)}
         />
         <button
-          className="bg-blurple hover:bg-blurple-dark rounded px-3 py-2 text-gray-100 flex-none"
+          className="bg-azure-500 hover:bg-azure-400 rounded-lg px-3 py-2 text-mist-100 flex-none"
           onClick={getWebhookInfo}
         >
           Get Info
@@ -61,41 +74,35 @@ export default function ToolsWebhookInfo() {
       </div>
       {error && <div className="text-red">{error}</div>}
       {webhookInfo && (
-        <div className="bg-dark-3 p-5 rounded-md">
+        <div className="bg-ink-700 p-5 rounded-xl">
           <div className="flex items-center space-x-4 mb-10">
-            <img
-              src={userAvatarUrl({
-                id: webhookInfo.id,
-                avatar: webhookInfo.avatar,
-                discriminator: "0",
-              })}
-              className="h-20 w-20 rounded-full"
-              alt=""
-            />
+            {avatarUrl && (
+              <img src={avatarUrl} className="h-20 w-20 rounded-full" alt="" />
+            )}
             <div>
-              <div className="text-xl font-medium text-gray-100">
+              <div className="text-xl font-medium text-mist-100">
                 {webhookInfo.name}
               </div>
-              <div className="text-gray-400 font-light">{webhookInfo.id}</div>
+              <div className="text-mist-400 font-light">{webhookInfo.id}</div>
             </div>
           </div>
 
           <div className="grid grid-cols-3">
             {webhookInfo.user && (
               <div>
-                <div className="font-bold text-gray-100 mb-2">Created by</div>
+                <div className="font-bold text-mist-100 mb-2">Created by</div>
                 <div className="flex">
-                  <div className="p-2 border-2 border-dark-5 flex items-center space-x-3 rounded">
+                  <div className="p-2 border-2 border-white/10 flex items-center space-x-3 rounded-lg">
                     <img
                       src={userAvatarUrl(webhookInfo.user)}
                       className="h-10 w-10 rounded-full"
                       alt=""
                     />
                     <div>
-                      <div className="font-medium text-gray-100">
+                      <div className="font-medium text-mist-100">
                         {webhookInfo.user.username}
                       </div>
-                      <div className="text-gray-400 font-light text-xs">
+                      <div className="text-mist-400 font-light text-xs">
                         {webhookInfo.user.id}
                       </div>
                     </div>
@@ -105,12 +112,12 @@ export default function ToolsWebhookInfo() {
             )}
 
             <div>
-              <div className="font-bold text-gray-100 mb-2">Guild ID</div>
-              <div className="text-gray-300">{webhookInfo.guild_id}</div>
+              <div className="font-bold text-mist-100 mb-2">Guild ID</div>
+              <div className="text-mist-300">{webhookInfo.guild_id}</div>
             </div>
             <div>
-              <div className="font-bold text-gray-100 mb-2">Channel ID</div>
-              <div className="text-gray-300">{webhookInfo.channel_id}</div>
+              <div className="font-bold text-mist-100 mb-2">Channel ID</div>
+              <div className="text-mist-300">{webhookInfo.channel_id}</div>
             </div>
           </div>
         </div>

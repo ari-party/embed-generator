@@ -1,73 +1,100 @@
-import { shallow } from "zustand/shallow";
-import { useCurrentMessageStore } from "../state/message";
-import { useSendSettingsStore } from "../state/sendSettings";
+import type { ReactNode } from "react";
+import {
+  useChildIds,
+  useDocumentStoreApi,
+  useDocument,
+  useMessageComponentBudget,
+} from "../state/document";
+import {
+  type EditorCapabilities,
+  EditorCapabilitiesContext,
+  FLUXER_MESSAGE_CAPABILITIES,
+  MESSAGE_CAPABILITIES,
+  WEBHOOK_MESSAGE_CAPABILITIES,
+} from "../state/editorCapabilities";
+import { slotScope } from "../state/validationError";
+import { useSendsToFluxer, useSendSettingsStore } from "../state/sendSettings";
 import { AutoAnimate } from "../util/autoAnimate";
 import Collapsable from "./Collapsable";
 import EditorComponentAddDropdown from "./EditorComponentAddDropdown";
 import EditorComponentEntry from "./EditorComponentEntry";
+import { FluxerComponentsNotice } from "./WebhookNotice";
 
 export default function EditorComponents({
   defaultCollapsed = true,
+  capabilities: fixedCapabilities,
 }: {
   defaultCollapsed?: boolean;
+  /** What can be added regardless of where the message is sent. */
+  capabilities?: EditorCapabilities;
 }) {
-  const components = useCurrentMessageStore(
-    (state) => state.components.map((e) => e.id),
-    shallow
-  );
-  const [clearComponents, addComponent] = useCurrentMessageStore(
-    (state) => [state.clearComponents, state.addComponent],
-    shallow
-  );
+  const rootId = useDocument((state) => state.rootId);
+  const components = useChildIds(rootId, "components");
+  const { count, limit } = useMessageComponentBudget();
+  const { removeChildren } = useDocumentStoreApi().getState();
 
-  const sendMode = useSendSettingsStore((state) => state.mode);
+  const webhook = useSendSettingsStore((state) => state.mode) === "webhook";
+  // A message with fixed capabilities isn't the one sent to the webhook.
+  const sendsToFluxer = useSendsToFluxer();
+  const fluxer = !fixedCapabilities && sendsToFluxer;
+
+  // Nothing to add on Fluxer, but components already there stay so they can be removed.
+  if (fluxer && components.length === 0) return null;
+
+  let capabilities = MESSAGE_CAPABILITIES;
+  let notice: ReactNode = null;
+  if (fixedCapabilities) {
+    capabilities = fixedCapabilities;
+  } else if (fluxer) {
+    capabilities = FLUXER_MESSAGE_CAPABILITIES;
+    notice = <FluxerComponentsNotice className="mb-3" />;
+  } else if (webhook) {
+    capabilities = WEBHOOK_MESSAGE_CAPABILITIES;
+  }
 
   return (
-    <Collapsable
-      id="components"
-      title="Components"
-      size="large"
-      defaultCollapsed={defaultCollapsed}
-      validationPathPrefix="components"
-      extra={
-        <div className="flex space-x-2">
-          <div className="text-sm italic font-light text-gray-400">
-            {components.length} / 5
+    <EditorCapabilitiesContext.Provider value={capabilities}>
+      <Collapsable
+        id="components"
+        title="Components"
+        size="large"
+        defaultCollapsed={defaultCollapsed}
+        validationPathPrefix={slotScope(rootId, "components")}
+        extra={
+          <div className="flex space-x-2">
+            <div className="text-sm italic font-light text-mist-400">
+              {count} / {limit}
+            </div>
+            <div className="bg-azure-500 px-1 rounded-lg text-white text-xs items-center flex font-bold">
+              ADVANCED
+            </div>
           </div>
-          <div className="bg-blurple px-1 rounded text-white text-xs items-center flex font-bold">
-            ADVANCED
-          </div>
-        </div>
-      }
-    >
-      {sendMode === "webhook" && (
-        <div className="text-orange-300 mb-3 text-sm font-light">
-          Interactive components are only available when selecting a server and
-          channel at the top instead of sending to a webhook.
-        </div>
-      )}
-      <AutoAnimate className="space-y-3 mb-3">
-        {components.map((id, i) => (
-          <div key={id}>
-            <EditorComponentEntry rootIndex={i} rootId={id} />
-          </div>
-        ))}
-      </AutoAnimate>
-      <div className="flex flex-col sm:flex-row space-y-3 sm:space-y-0 sm:space-x-3 items-center">
-        <EditorComponentAddDropdown
-          context="root"
-          size="large"
-          addComponent={addComponent}
-          disabled={components.length >= 5}
-        />
+        }
+      >
+        {notice}
+        <AutoAnimate className="space-y-3 mb-3">
+          {components.map((id) => (
+            <div key={id}>
+              <EditorComponentEntry id={id} root={true} />
+            </div>
+          ))}
+        </AutoAnimate>
+        <div className="flex flex-wrap gap-3 items-center">
+          <EditorComponentAddDropdown
+            context="root"
+            size="large"
+            parentId={rootId}
+            disabled={count >= limit}
+          />
 
-        <button
-          className="px-3 py-2.5 rounded text-white border-red border-2 hover:bg-red"
-          onClick={clearComponents}
-        >
-          Clear Components
-        </button>
-      </div>
-    </Collapsable>
+          <button
+            className="px-3 py-2.5 rounded-lg text-white border-2 border-red/70 hover:bg-red hover:border-red transition-colors whitespace-nowrap"
+            onClick={() => removeChildren(rootId, "components")}
+          >
+            Clear Components
+          </button>
+        </div>
+      </Collapsable>
+    </EditorCapabilitiesContext.Provider>
   );
 }

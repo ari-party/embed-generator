@@ -5,7 +5,6 @@ import EditorInput from "../components/EditorInput";
 import clsx from "clsx";
 import LoginSuggest from "../components/LoginSuggest";
 import { useCreatedSavedMessageMutation } from "../api/mutations";
-import { useCurrentMessageStore } from "../state/message";
 import MessageExportImport from "../components/MessageExportImport";
 import { useToasts } from "../util/toasts";
 import {
@@ -14,6 +13,9 @@ import {
 } from "../util/premium";
 import { useSendSettingsStore } from "../state/sendSettings";
 import SavedMessage from "../components/SavedMessage";
+import { MAX_SAVED_MESSAGE_NAME_LENGTH } from "../api/limits";
+import { getCurrentMessage } from "../state/currentMessage";
+import LimitButton from "../components/LimitButton";
 
 export default function MessagesView() {
   const selectedGuildId = useSendSettingsStore((s) => s.guildId);
@@ -35,10 +37,9 @@ export default function MessagesView() {
 
   const guildFeatures = usePremiumGuildFeatures(guildId);
   const userFeatures = usePremiumUserFeatures();
-  const maxMessages =
-    (source === "user"
-      ? userFeatures?.max_saved_messages
-      : guildFeatures?.max_saved_messages) || 0;
+  const features = source === "user" ? userFeatures : guildFeatures;
+  const maxMessages = features?.max_saved_messages || 0;
+  const maxVersions = features?.max_saved_message_versions || 0;
 
   const [newMessageName, setNewMessageName] = useState("");
 
@@ -47,15 +48,6 @@ export default function MessagesView() {
   const createMessageMutation = useCreatedSavedMessageMutation();
 
   function createMessage() {
-    if (messageCount >= maxMessages) {
-      createToast({
-        title: "Failed to save message",
-        message: `You have reached the maximum number of saved messages (${maxMessages})`,
-        type: "error",
-      });
-      return;
-    }
-
     if (!newMessageName) {
       return;
     }
@@ -66,7 +58,7 @@ export default function MessagesView() {
         req: {
           name: newMessageName,
           description: "",
-          data: useCurrentMessageStore.getState(),
+          data: getCurrentMessage(),
         },
       },
       {
@@ -82,7 +74,7 @@ export default function MessagesView() {
             });
           }
         },
-      }
+      },
     );
   }
 
@@ -92,11 +84,11 @@ export default function MessagesView() {
         <div className="mb-10">
           <div className="flex space-x-4 items-center mb-3">
             <div className="text-white text-2xl">Saved Messages</div>
-            <div className="font-light italic text-gray-400">
+            <div className="font-light italic text-mist-400">
               {messageCount} / {maxMessages}
             </div>
           </div>
-          <div className="text-gray-400 font-light text-sm">
+          <div className="text-mist-400 font-light text-sm">
             You can save the message that you are currently working on in the
             editor to continue working on it later. Saved Messages are stored in
             the cloud and can be accessed from any device.
@@ -105,7 +97,7 @@ export default function MessagesView() {
         {user?.success ? (
           <>
             <div className="mb-8">
-              <div className="uppercase text-gray-300 text-sm font-medium mb-1.5">
+              <div className="uppercase text-mist-300 text-sm font-medium mb-1.5">
                 Show Messages For
               </div>
               <div className="w-full max-w-md">
@@ -118,11 +110,12 @@ export default function MessagesView() {
                   <SavedMessage
                     message={message}
                     guildId={guildId}
+                    maxVersions={maxVersions}
                     key={message.id}
                   />
                 ))}
                 {messagesQuery.data.data.length === 0 && (
-                  <div className="text-gray-400 font-light">
+                  <div className="text-mist-400 font-light">
                     There are no saved messages yet. Enter a name below and
                     click on "Save Message"
                   </div>
@@ -132,22 +125,25 @@ export default function MessagesView() {
             <div className="flex flex-col md:flex-row space-y-3 md:space-y-0 md:space-x-3 items-end flex-none mb-5">
               <EditorInput
                 label="New Message Name"
-                maxLength={25}
+                maxLength={MAX_SAVED_MESSAGE_NAME_LENGTH}
                 value={newMessageName}
                 onChange={setNewMessageName}
                 className="w-full"
               ></EditorInput>
-              <button
+              <LimitButton
+                limit="max_saved_messages"
+                features={features}
+                count={messageCount}
                 className={clsx(
-                  "px-3 py-2 rounded text-white flex-none",
+                  "px-3 py-2 rounded-lg text-white flex-none",
                   newMessageName
-                    ? "bg-blurple hover:bg-blurple-dark"
-                    : "bg-dark-2 cursor-not-allowed"
+                    ? "bg-azure-500 hover:bg-azure-400"
+                    : "bg-ink-900 cursor-not-allowed",
                 )}
                 onClick={createMessage}
               >
                 Save Message
-              </button>
+              </LimitButton>
             </div>
             <MessageExportImport
               guildId={guildId}

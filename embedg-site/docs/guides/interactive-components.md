@@ -1,38 +1,39 @@
 ---
-sidebar_position: 3
+sidebar_position: 4
+description: "Full guide to buttons, select menus and actions in Embed Generator: styles, limits, link buttons, role actions and text or saved message responses."
 ---
 
 # Interactive Components
 
-Interactive Components can be added to your messages to allow users to interact with them. Right now there two types of Interactive Components: buttons & select menus.
+Interactive Components can be added to your messages to allow users to interact with them. Right now there are two types of Interactive Components: buttons & select menus.
 
-Interactive Components are only available after logging in and selecting a channel. They aren't available when sending to a Webhook directly. The option can be found at the very button of the message editor.
+Buttons with actions and select menus are only available after logging in and selecting a channel. When sending to a webhook, only link buttons work. The option can be found at the very bottom of the message editor.
 
-![Interactive Components](./interactive-components.png)
+![Interactive Components](./interactive-components.webp)
 
 ## Buttons
 
-Buttons are simplest way to make your messages interactive. You can have up to 5 button rows with 5 buttons each which makes for a maximum number of 25 buttons that can be added to a message.
+Buttons are the simplest way to make your messages interactive. You can have up to 5 button rows with 5 buttons each which makes for a maximum number of 25 buttons that can be added to a message.
 
 There are different Styles for buttons. The first 4 styles just change the color and appearance of your button, but the last one is special. Use the "Link" button style to make a direct link to a Website or any of the other button styles if you want to respond with a message or assign roles.
 
 A button must have a label which is displayed to the user and can optionally have an emoji which is displayed next to the label. If you want to have a button that is purely there for design purposes but isn't interactive, select the "Disabled" option.
 
-If you have select the "Link" style you have to input an URL that the button will link to. Otherwise you can add a number of [Actions](#actions) to your button. These are used to respond to interactions or assign roles to the user.
+If you have selected the "Link" style you have to input an URL that the button will link to. Otherwise you can add a number of [Actions](#actions) to your button. These are used to respond to interactions or assign roles to the user.
 
-![Interactive Buttons](./interactive-components-buttons.png)
+![Interactive Buttons](./interactive-components-buttons.webp)
 
 ## Select Menus
 
-Select menues are a bit more complex and work similar to a dropdown menu. You can add up to 5 select menus to your message and each select menu takes the space of one button row (5 buttons).
+Select menus are a bit more complex and work similar to a dropdown menu. You can add up to 5 select menus to your message and each select menu takes the space of one button row (5 buttons).
 
-You can set a "Placeholer" for your select menu which is more or less the equivalent of the label for a button. If you don't set a placeholder a generic text "Make a selection" will be displayed.
+You can set a "Placeholder" for your select menu which is more or less the equivalent of the label for a button. If you don't set a placeholder a generic text "Make a selection" will be displayed.
 
 Each select menu can have up to 25 options. These options are what your users will be able to select from the dropdown. Each option must have a label and can optionally have a description below the label and an emoji next to it.
 
 Additionally you can add a number of [Actions](#actions). These are used to respond to interactions or assign roles to the user when they select the option.
 
-![Interactive Select Menus](./interactive-components-select.png)
+![Interactive Select Menus](./interactive-components-select.webp)
 
 ## Actions
 
@@ -46,7 +47,9 @@ This action will create a simple text response. You can select if the message sh
 
 You can also select where the message should be send. By default a new message will be created in the channel where the user has interacted with the components or ran the command, but you can also select to send a direct message to the user or even edit the message.
 
-![Action Text Response](./actions-text-response.png)
+With "Other Channel", which needs [Embed Generator Premium](../premium), the message is sent to a channel of your choice instead, for example to post a report in a staff channel when someone clicks a button. The bot sends this message, so it needs permission to send messages in that channel. You need the Manage Webhooks permission in your server's role settings to use it. See [Channel Permissions](./channel-permissions#actions-that-send-to-other-channels) if channels are greyed out.
+
+![Action Text Response](./actions-text-response.webp)
 
 ### Saved Message Response
 
@@ -56,7 +59,7 @@ You can create a saved message by creating a message in the editor and the going
 
 Once you have selected the message that you want to respond with you can select if you want to create a public response and how the message should be send. This works the same as for text responses above.
 
-![Action Saved Message Response](./actions-saved-response.png)
+![Action Saved Message Response](./actions-saved-response.webp)
 
 ### Add, Remove, or Toggle Roles
 
@@ -67,4 +70,4 @@ If you have a [Custom Bot](./custom-bots) configured make sure it also has the n
 
 By default Embed Generator will send a text response to the user to indicate that a role has been addeed or removed. If you don't want to have custom response instead unselect the "Default Response" options.
 
-![Actions Assign Roles](./actions-assign-roles.png)
+![Actions Assign Roles](./actions-assign-roles.webp)

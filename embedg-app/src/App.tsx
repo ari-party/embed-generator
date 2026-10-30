@@ -1,28 +1,37 @@
-import { lazy, ReactNode, Suspense } from "react";
+import { type ReactNode, Suspense } from "react";
 import { Route, Routes, Navigate } from "react-router-dom";
 import { ToastContainer } from "./util/toasts";
 import EditorView from "./views/editor/editor";
 import RequestLoadingIndicator from "./components/RequestLoadingIndicator";
-import ClearView from "./views/editor/clear";
+import MessageSettingsView from "./views/editor/messageSettings";
 import ShareView from "./views/editor/share";
 import EditorSideNav from "./components/SideNav";
-import ActivityLoadingScreen from "./components/ActivityLoadingScreen";
-import "./util/activity";
 import UpsellPopup from "./components/UpsellPopup";
 import ConfirmOnExit from "./components/ConfirmOnExit";
+import LoginErrorHandler from "./components/LoginErrorHandler";
+import { lazyView } from "./util/lazyView";
 
-const LazyJsonView = lazy(() => import("./views/editor/json"));
-const LazyAssistantView = lazy(() => import("./views/editor/assisstant"));
-const LazyMessagesView = lazy(() => import("./views/messages"));
-const LazyPremiumView = lazy(() => import("./views/premium"));
-const LazyShareRestoreView = lazy(() => import("./views/editor/shareRestore"));
-const LazySettingsView = lazy(() => import("./views/settings"));
-const LazyCommandsView = lazy(() => import("./views/commands"));
-const LazyScheduledMessagesView = lazy(() => import("./views/scheduled"));
-const LazyToolsView = lazy(() => import("./views/tools"));
-const LazyColoredTextToolView = lazy(() => import("./views/tools/coloredText"));
-const LazyWebhookInfoToolView = lazy(() => import("./views/tools/webhookInfo"));
-const LazyEmbedLinksToolView = lazy(() => import("./views/tools/embedLinks"));
+const LazyJsonView = lazyView(() => import("./views/editor/json"));
+const LazyNewMessageView = lazyView(() => import("./views/editor/new"));
+const LazyAssistantView = lazyView(() => import("./views/editor/assistant"));
+const LazyMessagesView = lazyView(() => import("./views/messages"));
+const LazyPremiumView = lazyView(() => import("./views/premium"));
+const LazyShareRestoreView = lazyView(
+  () => import("./views/editor/shareRestore"),
+);
+const LazySettingsView = lazyView(() => import("./views/settings"));
+const LazyCommandsView = lazyView(() => import("./views/commands"));
+const LazyScheduledMessagesView = lazyView(() => import("./views/scheduled"));
+const LazyToolsView = lazyView(() => import("./views/tools"));
+const LazyColoredTextToolView = lazyView(
+  () => import("./views/tools/coloredText"),
+);
+const LazyWebhookInfoToolView = lazyView(
+  () => import("./views/tools/webhookInfo"),
+);
+const LazyEmbedLinksToolView = lazyView(
+  () => import("./views/tools/embedLinks"),
+);
 
 function SuspendedView({ children }: { children: ReactNode }) {
   return <Suspense>{children}</Suspense>;
@@ -32,14 +41,21 @@ function App() {
   return (
     <div className="h-[100dvh] w-[100dvw] overflow-y-auto">
       <RequestLoadingIndicator />
-      <ActivityLoadingScreen />
       <UpsellPopup />
       <ConfirmOnExit />
+      <LoginErrorHandler />
       <div className="flex h-full">
         <EditorSideNav />
         <Routes>
           <Route path="/editor" element={<EditorView />}>
-            <Route path="clear" element={<ClearView />} />
+            <Route
+              path="new"
+              element={
+                <SuspendedView>
+                  <LazyNewMessageView />
+                </SuspendedView>
+              }
+            />
             <Route
               path="json"
               element={
@@ -58,6 +74,7 @@ function App() {
             />
 
             <Route path="share" element={<ShareView />} />
+            <Route path="settings" element={<MessageSettingsView />} />
             <Route
               path="share/:sharedMessageId"
               element={

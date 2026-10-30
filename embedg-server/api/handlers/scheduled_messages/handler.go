@@ -1,126 +1,189 @@
 package scheduled_messages
 
 import (
-	"database/sql"
+	"errors"
+	"fmt"
+	"slices"
 	"time"
 
+	"log/slog"
+
+	"github.com/adhocore/gronx"
+	"github.com/disgoorg/disgo/discord"
+	"github.com/disgoorg/disgo/rest"
 	"github.com/gofiber/fiber/v2"
-	"github.com/merlinfuchs/embed-generator/embedg-server/api/access"
-	"github.com/merlinfuchs/embed-generator/embedg-server/api/helpers"
+	"github.com/merlinfuchs/embed-generator/embedg-server/access"
+	"github.com/merlinfuchs/embed-generator/embedg-server/api/handlers"
 	"github.com/merlinfuchs/embed-generator/embedg-server/api/session"
 	"github.com/merlinfuchs/embed-generator/embedg-server/api/wire"
-	"github.com/merlinfuchs/embed-generator/embedg-server/db/postgres"
-	"github.com/merlinfuchs/embed-generator/embedg-server/db/postgres/pgmodel"
-	"github.com/merlinfuchs/embed-generator/embedg-server/scheduled_messages"
+	"github.com/merlinfuchs/embed-generator/embedg-server/common"
+	scheduled_messages "github.com/merlinfuchs/embed-generator/embedg-server/manager/scheduled_message"
+	"github.com/merlinfuchs/embed-generator/embedg-server/manager/webhook"
+	"github.com/merlinfuchs/embed-generator/embedg-server/model"
 	"github.com/merlinfuchs/embed-generator/embedg-server/store"
-	"github.com/merlinfuchs/embed-generator/embedg-server/util"
-	"github.com/rs/zerolog/log"
 	"gopkg.in/guregu/null.v4"
 )
 
 type ScheduledMessageHandler struct {
-	pg        *postgres.PostgresStore
-	am        *access.AccessManager
-	planStore store.PlanStore
+	scheduledMessageStore store.ScheduledMessageStore
+	am                    *access.AccessManager
+	planStore             store.PlanStore
+	webhookManager        *webhook.WebhookManager
+	manager               *scheduled_messages.ScheduledMessageManager
 }
 
-func New(pg *postgres.PostgresStore, am *access.AccessManager, planStore store.PlanStore) *ScheduledMessageHandler {
+func New(scheduledMessageStore store.ScheduledMessageStore, am *access.AccessManager, planStore store.PlanStore, webhookManager *webhook.WebhookManager, manager *scheduled_messages.ScheduledMessageManager) *ScheduledMessageHandler {
 	return &ScheduledMessageHandler{
-		pg:        pg,
-		am:        am,
-		planStore: planStore,
+		scheduledMessageStore: scheduledMessageStore,
+		am:                    am,
+		planStore:             planStore,
+		webhookManager:        webhookManager,
+		manager:               manager,
 	}
+}
+
+// checkCrosspost rejects publishing in a channel that has no following servers to publish to.
+func checkCrosspost(channel discord.GuildChannel, crosspost bool) error {
+	if crosspost && channel.Type() != discord.ChannelTypeGuildNews {
+		return handlers.BadRequest("invalid_crosspost", "Only messages in announcement channels can be published.")
+	}
+	return nil
+}
+
+// checkSavedMessage rejects a saved message the scheduled message couldn't send, so that shows
+// on save and not with the first send.
+func (h *ScheduledMessageHandler) checkSavedMessage(c *fiber.Ctx, features model.PlanFeatures, guildID, channelID common.ID, savedMessageID string) error {
+	return userFailure(h.manager.CheckScheduledMessage(c.UserContext(), model.ScheduledMessage{
+		GuildID:        guildID,
+		ChannelID:      channelID,
+		SavedMessageID: savedMessageID,
+	}, features), "invalid_saved_message")
+}
+
+// userFailure turns a failure the user can fix into a bad request with its reason.
+func userFailure(err error, code string) error {
+	if err == nil {
+		return nil
+	}
+	if reason, ok := scheduled_messages.UserFailure(err); ok {
+		return handlers.BadRequest(code, reason)
+	}
+	return err
+}
+
+// messageSender checks that the message to edit exists in the channel and can be edited, and finds
+// who sent it, once here rather than on every run.
+func (h *ScheduledMessageHandler) messageSender(c *fiber.Ctx, channelID common.ID, messageID common.NullID) (common.NullID, error) {
+	if !messageID.Valid {
+		return common.NullID{}, nil
+	}
+
+	sender, err := h.webhookManager.MessageSender(c.UserContext(), channelID, messageID.ID)
+	if err != nil {
+		if common.IsDiscordRestErrorCode(err, rest.JSONErrorCodeUnknownMessage) {
+			return common.NullID{}, handlers.BadRequest("unknown_message", "The message to edit doesn't exist in the selected channel.")
+		}
+		if common.IsDiscordRestErrorCode(err, rest.JSONErrorCodeMissingAccess, rest.JSONErrorCodeLackPermissionsToPerformAction) {
+			return common.NullID{}, handlers.BadRequest("missing_permissions", "Embed Generator needs the Read Message History permission in the channel to find the message to edit.")
+		}
+		return common.NullID{}, err
+	}
+	return sender, nil
 }
 
 func (h *ScheduledMessageHandler) HandleCreateScheduledMessage(c *fiber.Ctx, req wire.ScheduledMessageCreateRequestWire) error {
 	session := c.Locals("session").(*session.Session)
-	guildID := c.Query("guild_id")
+	guildID, err := handlers.QueryID(c, "guild_id")
+	if err != nil {
+		return err
+	}
 
 	if err := h.am.CheckGuildAccessForRequest(c, guildID); err != nil {
 		return err
 	}
 
-	if err := h.am.CheckChannelAccessForRequest(c, req.ChannelID); err != nil {
-		return err
-	}
-
-	features, err := h.planStore.GetPlanFeaturesForGuild(c.Context(), guildID)
+	channel, err := h.am.CheckChannelAccessForRequestInGuild(c, req.ChannelID, guildID)
 	if err != nil {
 		return err
 	}
 
-	if !req.OnlyOnce && !features.PeriodicScheduledMessages {
-		return helpers.Forbidden("insufficient_plan", "Periodic scheduled messages are not available on your plan.")
+	if err := checkCrosspost(channel, req.Crosspost); err != nil {
+		return err
 	}
 
-	// TODO: validate max scheduled messages
-
-	if req.EndAt.Valid && req.EndAt.Time.Before(req.StartAt) {
-		return helpers.BadRequest("invalid_end_at", "The end_at field must be after the start_at field.")
+	features, err := h.planStore.GetPlanFeaturesForGuild(c.UserContext(), guildID)
+	if err != nil {
+		return err
 	}
 
-	if req.StartAt.Before(time.Now().UTC()) {
-		req.StartAt = time.Now().UTC()
+	if err := normalizeSchedule(&req.ScheduledMessageScheduleWire); err != nil {
+		return err
+	}
+	if err := checkPlan(features, &req.ScheduledMessageScheduleWire); err != nil {
+		return err
 	}
 
-	nextAt := req.StartAt
-	if !req.OnlyOnce {
-		var err error
-		nextAt, err = scheduled_messages.GetFirstCronTick(req.CronExpression.String, req.StartAt, req.CronTimezone.String)
-		if err != nil {
-			return helpers.BadRequest("invalid_cron_expression", "The cron expression is invalid.")
+	now := time.Now().UTC()
+	nextAt, err := firstRun(&req.ScheduledMessageScheduleWire, now, now.Add(-pickedDateGrace))
+	if err != nil {
+		return err
+	}
+	if err := endAfterRuns(&req.ScheduledMessageScheduleWire, nextAt); err != nil {
+		return err
+	}
+
+	if req.Enabled {
+		if err := checkRunsBeforeEnd(nextAt, req.EndAt, req.CronTimezone.String); err != nil {
+			return err
 		}
+	}
 
-		nextNextAt, err := scheduled_messages.GetNextCronTick(req.CronExpression.String, nextAt, req.CronTimezone.String)
-		if err != nil {
-			return helpers.BadRequest("invalid_cron_expression", "The cron expression is invalid.")
-		}
+	existingCount, err := h.scheduledMessageStore.CountScheduledMessages(c.UserContext(), guildID)
+	if err != nil {
+		return err
+	}
 
-		if nextNextAt.Sub(nextAt) < time.Minute {
-			return helpers.BadRequest("invalid_cron_expression", "The cron expression is too tight and will trigger too often.")
+	if int(existingCount) >= features.MaxScheduledMessages {
+		return handlers.Forbidden("insufficient_plan", "You have reached the maximum number of scheduled messages for your plan!")
+	}
+
+	// Before looking up the message to edit on Discord, a bad saved message fails faster.
+	if req.Enabled {
+		if err := h.checkSavedMessage(c, features, guildID, req.ChannelID, req.SavedMessageID); err != nil {
+			return err
 		}
 	}
 
-	msg, err := h.pg.Q.InsertScheduledMessage(c.Context(), pgmodel.InsertScheduledMessageParams{
-		ID:        util.UniqueID(),
-		CreatorID: session.UserID,
-		GuildID:   guildID,
-		ChannelID: req.ChannelID,
-		MessageID: sql.NullString{
-			String: req.MessageID.String,
-			Valid:  req.MessageID.Valid,
-		},
-		ThreadName: sql.NullString{
-			String: req.ThreadName.String,
-			Valid:  req.ThreadName.Valid,
-		},
-		SavedMessageID: req.SavedMessageID,
-		Name:           req.Name,
-		Description: sql.NullString{
-			String: req.Description.String,
-			Valid:  req.Description.Valid,
-		},
-		CronExpression: sql.NullString{
-			String: req.CronExpression.String,
-			Valid:  req.CronExpression.Valid,
-		},
-		CronTimezone: sql.NullString{
-			String: req.CronTimezone.String,
-			Valid:  req.CronTimezone.Valid,
-		},
-		StartAt: req.StartAt,
-		EndAt: sql.NullTime{
-			Time:  req.EndAt.Time,
-			Valid: req.EndAt.Valid,
-		},
-		NextAt:    nextAt,
-		OnlyOnce:  req.OnlyOnce,
-		CreatedAt: time.Now().UTC(),
-		UpdatedAt: time.Now().UTC(),
-		Enabled:   req.Enabled,
+	messageSender, err := h.messageSender(c, req.ChannelID, req.MessageID)
+	if err != nil {
+		return err
+	}
+
+	msg, err := h.scheduledMessageStore.CreateScheduledMessage(c.UserContext(), model.ScheduledMessage{
+		ID:               common.InternalID(),
+		CreatorID:        session.UserID,
+		GuildID:          guildID,
+		ChannelID:        req.ChannelID,
+		MessageID:        req.MessageID,
+		MessageWebhookID: messageSender,
+		ThreadName:       req.ThreadName,
+		Crosspost:        req.Crosspost,
+		SavedMessageID:   req.SavedMessageID,
+		Name:             req.Name,
+		Description:      req.Description,
+		CronExpression:   req.CronExpression,
+		CronTimezone:     req.CronTimezone,
+		CronInterval:     req.CronInterval,
+		StartAt:          req.StartAt,
+		EndAt:            req.EndAt,
+		NextAt:           nextAt,
+		RunTimes:         req.RunTimes,
+		CreatedAt:        time.Now().UTC(),
+		UpdatedAt:        time.Now().UTC(),
+		Enabled:          req.Enabled,
 	})
 	if err != nil {
-		log.Error().Err(err).Msg("Failed to create scheduled message")
+		slog.Error("Failed to create scheduled message", slog.Any("error", err))
 		return err
 	}
 
@@ -131,22 +194,24 @@ func (h *ScheduledMessageHandler) HandleCreateScheduledMessage(c *fiber.Ctx, req
 }
 
 func (h *ScheduledMessageHandler) HandleListScheduledMessages(c *fiber.Ctx) error {
-	guildID := c.Query("guild_id")
+	guildID, err := handlers.QueryID(c, "guild_id")
+	if err != nil {
+		return err
+	}
 
 	if err := h.am.CheckGuildAccessForRequest(c, guildID); err != nil {
 		return err
 	}
 
-	messages, err := h.pg.Q.GetScheduledMessages(c.Context(), guildID)
-
+	messages, err := h.scheduledMessageStore.GetScheduledMessages(c.UserContext(), guildID)
 	if err != nil {
-		log.Error().Err(err).Msg("Failed to get scheduled messages")
+		slog.Error("Failed to get scheduled messages", slog.Any("error", err))
 		return err
 	}
 
 	res := make([]wire.ScheduledMessageWire, len(messages))
 	for i, message := range messages {
-		res[i] = scheduledMessageModelToWire(message)
+		res[i] = scheduledMessageModelToWire(&message)
 	}
 
 	return c.JSON(wire.ScheduledMessageListResponseWire{
@@ -157,21 +222,21 @@ func (h *ScheduledMessageHandler) HandleListScheduledMessages(c *fiber.Ctx) erro
 
 func (h *ScheduledMessageHandler) HandleGetScheduledMessage(c *fiber.Ctx) error {
 	messageID := c.Params("messageID")
-	guildID := c.Query("guild_id")
+	guildID, err := handlers.QueryID(c, "guild_id")
+	if err != nil {
+		return err
+	}
 
 	if err := h.am.CheckGuildAccessForRequest(c, guildID); err != nil {
 		return err
 	}
 
-	msg, err := h.pg.Q.GetScheduledMessage(c.Context(), pgmodel.GetScheduledMessageParams{
-		ID:      messageID,
-		GuildID: guildID,
-	})
+	msg, err := h.scheduledMessageStore.GetScheduledMessage(c.UserContext(), guildID, messageID)
 	if err != nil {
-		if err == sql.ErrNoRows {
-			return helpers.NotFound("unknown_message", "The scheduled message does not exist or has expired.")
+		if errors.Is(err, store.ErrNotFound) {
+			return handlers.NotFound("unknown_message", "The scheduled message does not exist or has expired.")
 		}
-		log.Error().Err(err).Msg("Failed to get scheduled message")
+		slog.Error("Failed to get scheduled message", slog.Any("error", err))
 		return err
 	}
 
@@ -183,93 +248,119 @@ func (h *ScheduledMessageHandler) HandleGetScheduledMessage(c *fiber.Ctx) error 
 
 func (h *ScheduledMessageHandler) HandleUpdateScheduledMessage(c *fiber.Ctx, req wire.ScheduledMessageUpdateRequestWire) error {
 	messageID := c.Params("messageID")
-	guildID := c.Query("guild_id")
+	guildID, err := handlers.QueryID(c, "guild_id")
+	if err != nil {
+		return err
+	}
 
 	if err := h.am.CheckGuildAccessForRequest(c, guildID); err != nil {
 		return err
 	}
 
-	if err := h.am.CheckChannelAccessForRequest(c, req.ChannelID); err != nil {
-		return err
-	}
-
-	features, err := h.planStore.GetPlanFeaturesForGuild(c.Context(), guildID)
+	channel, err := h.am.CheckChannelAccessForRequestInGuild(c, req.ChannelID, guildID)
 	if err != nil {
 		return err
 	}
 
-	if !req.OnlyOnce && !features.PeriodicScheduledMessages {
-		return helpers.Forbidden("insufficient_plan", "Periodic scheduled messages are not available on your plan.")
+	if err := checkCrosspost(channel, req.Crosspost); err != nil {
+		return err
 	}
 
-	if req.EndAt.Valid && req.EndAt.Time.Before(req.StartAt) {
-		return helpers.BadRequest("invalid_end_at", "The end_at field must be after the start_at field.")
+	features, err := h.planStore.GetPlanFeaturesForGuild(c.UserContext(), guildID)
+	if err != nil {
+		return err
 	}
 
-	if req.StartAt.Before(time.Now().UTC()) {
-		req.StartAt = time.Now().UTC()
+	existing, err := h.scheduledMessageStore.GetScheduledMessage(c.UserContext(), guildID, messageID)
+	if err != nil {
+		if errors.Is(err, store.ErrNotFound) {
+			return handlers.NotFound("unknown_message", "The scheduled message does not exist.")
+		}
+		slog.Error("Failed to get scheduled message", slog.Any("error", err))
+		return err
 	}
 
-	nextAt := req.StartAt
-	if !req.OnlyOnce {
-		var err error
-		nextAt, err = scheduled_messages.GetFirstCronTick(req.CronExpression.String, req.StartAt, req.CronTimezone.String)
+	if err := normalizeSchedule(&req.ScheduledMessageScheduleWire); err != nil {
+		return err
+	}
+	if err := checkPlan(features, &req.ScheduledMessageScheduleWire); err != nil {
+		return err
+	}
+	now := time.Now().UTC()
+
+	// Only recompute the schedule when it actually changed, otherwise e.g. toggling
+	// enabled would reset start_at and drop a pending send.
+	scheduleUnchanged := slices.EqualFunc(existing.RunTimes, req.RunTimes, time.Time.Equal) &&
+		existing.StartAt.Equal(req.StartAt) &&
+		existing.CronExpression.Equal(req.CronExpression) &&
+		existing.CronTimezone.Equal(req.CronTimezone) &&
+		existing.CronInterval == req.CronInterval
+
+	// A disabled row with next_at in the past has already fired or was given up on,
+	// so re-enabling it needs a fresh schedule instead of an immediate send.
+	if !existing.Enabled && existing.NextAt.Before(now) {
+		scheduleUnchanged = false
+	}
+
+	var nextAt time.Time
+	if scheduleUnchanged {
+		req.StartAt = existing.StartAt
+		nextAt = existing.NextAt
+	} else {
+		nextAt, err = firstRun(&req.ScheduledMessageScheduleWire, now, pendingDatesAfter(existing, now))
 		if err != nil {
-			return helpers.BadRequest("invalid_cron_expression", "The cron expression is invalid.")
+			return err
 		}
+	}
+	if err := endAfterRuns(&req.ScheduledMessageScheduleWire, nextAt); err != nil {
+		return err
+	}
 
-		nextNextAt, err := scheduled_messages.GetNextCronTick(req.CronExpression.String, nextAt, req.CronTimezone.String)
-		if err != nil {
-			return helpers.BadRequest("invalid_cron_expression", "The cron expression is invalid.")
-		}
-
-		if nextNextAt.Sub(nextAt) < time.Minute {
-			return helpers.BadRequest("invalid_cron_expression", "The cron expression is too tight and will trigger too often.")
+	if req.Enabled {
+		if err := checkRunsBeforeEnd(nextAt, req.EndAt, req.CronTimezone.String); err != nil {
+			return err
 		}
 	}
 
-	msg, err := h.pg.Q.UpdateScheduledMessage(c.Context(), pgmodel.UpdateScheduledMessageParams{
-		ID:        messageID,
-		GuildID:   guildID,
-		ChannelID: req.ChannelID,
-		MessageID: sql.NullString{
-			String: req.MessageID.String,
-			Valid:  req.MessageID.Valid,
-		},
-		ThreadName: sql.NullString{
-			String: req.ThreadName.String,
-			Valid:  req.ThreadName.Valid,
-		},
-		SavedMessageID: req.SavedMessageID,
-		Name:           req.Name,
-		Description: sql.NullString{
-			String: req.Description.String,
-			Valid:  req.Description.Valid,
-		},
-		CronExpression: sql.NullString{
-			String: req.CronExpression.String,
-			Valid:  req.CronExpression.Valid,
-		},
-		CronTimezone: sql.NullString{
-			String: req.CronTimezone.String,
-			Valid:  req.CronTimezone.Valid,
-		},
-		StartAt: req.StartAt,
-		EndAt: sql.NullTime{
-			Time:  req.EndAt.Time,
-			Valid: req.EndAt.Valid,
-		},
-		NextAt:    nextAt,
-		OnlyOnce:  req.OnlyOnce,
-		Enabled:   req.Enabled,
-		UpdatedAt: time.Now().UTC(),
+	// Before looking up the message to edit on Discord, a bad saved message fails faster.
+	if req.Enabled {
+		if err := h.checkSavedMessage(c, features, guildID, req.ChannelID, req.SavedMessageID); err != nil {
+			return err
+		}
+	}
+
+	messageSender, err := h.messageSender(c, req.ChannelID, req.MessageID)
+	if err != nil {
+		return err
+	}
+
+	msg, err := h.scheduledMessageStore.UpdateScheduledMessage(c.UserContext(), model.ScheduledMessage{
+		ID:               messageID,
+		GuildID:          guildID,
+		ChannelID:        req.ChannelID,
+		MessageID:        req.MessageID,
+		MessageWebhookID: messageSender,
+		ThreadName:       req.ThreadName,
+		Crosspost:        req.Crosspost,
+		SavedMessageID:   req.SavedMessageID,
+		Name:             req.Name,
+		Description:      req.Description,
+		CronExpression:   req.CronExpression,
+		CronTimezone:     req.CronTimezone,
+		CronInterval:     req.CronInterval,
+		StartAt:          req.StartAt,
+		EndAt:            req.EndAt,
+		NextAt:           nextAt,
+		RunTimes:         req.RunTimes,
+		Enabled:          req.Enabled,
+		UpdatedAt:        time.Now().UTC(),
 	})
 
 	if err != nil {
-		if err == sql.ErrNoRows {
-			return helpers.NotFound("unknown_message", "The scheduled message does not exist.")
+		if errors.Is(err, store.ErrNotFound) {
+			return handlers.NotFound("unknown_message", "The scheduled message does not exist.")
 		}
-		log.Error().Err(err).Msg("Failed to update scheduled message")
+		slog.Error("Failed to update scheduled message", slog.Any("error", err))
 		return err
 	}
 
@@ -279,24 +370,188 @@ func (h *ScheduledMessageHandler) HandleUpdateScheduledMessage(c *fiber.Ctx, req
 	})
 }
 
-func (h *ScheduledMessageHandler) HandleDeleteScheduledMessage(c *fiber.Ctx) error {
-	messageID := c.Params("messageID")
-	guildID := c.Query("guild_id")
+// HandleTestScheduledMessage sends the saved message of a scheduled message to its channel once,
+// so the user sees what the schedule will send. It's always a new message, a test shouldn't
+// edit the one the schedule edits. Unlike the check on save it runs the templates, KV changes
+// included, like any send does.
+func (h *ScheduledMessageHandler) HandleTestScheduledMessage(c *fiber.Ctx, req wire.ScheduledMessageTestRequestWire) error {
+	session := c.Locals("session").(*session.Session)
+	guildID, err := handlers.QueryID(c, "guild_id")
+	if err != nil {
+		return err
+	}
 
 	if err := h.am.CheckGuildAccessForRequest(c, guildID); err != nil {
 		return err
 	}
 
-	err := h.pg.Q.DeleteScheduledMessage(c.Context(), pgmodel.DeleteScheduledMessageParams{
-		ID:      messageID,
-		GuildID: guildID,
-	})
+	if _, err := h.am.CheckChannelAccessForRequestInGuild(c, req.ChannelID, guildID); err != nil {
+		return err
+	}
 
+	_, err = h.manager.SendScheduledMessage(c.UserContext(), model.ScheduledMessage{
+		CreatorID:      session.UserID,
+		GuildID:        guildID,
+		ChannelID:      req.ChannelID,
+		ThreadName:     req.ThreadName,
+		SavedMessageID: req.SavedMessageID,
+	})
+	if err := userFailure(err, "send_failed"); err != nil {
+		return err
+	}
+
+	return c.JSON(wire.ScheduledMessageTestResponseWire{
+		Success: true,
+		Data:    struct{}{},
+	})
+}
+
+// How many upcoming runs a preview lists.
+const previewRuns = 5
+
+// HandlePreviewScheduledMessage lists when a schedule would send, so it can be checked before it's
+// saved. It fails the same way saving it would.
+func (h *ScheduledMessageHandler) HandlePreviewScheduledMessage(c *fiber.Ctx, req wire.ScheduledMessageScheduleWire) error {
+	guildID, err := handlers.QueryID(c, "guild_id")
 	if err != nil {
-		if err == sql.ErrNoRows {
-			return helpers.NotFound("unknown_message", "The scheduled message does not exist.")
+		return err
+	}
+
+	if err := h.am.CheckGuildAccessForRequest(c, guildID); err != nil {
+		return err
+	}
+
+	if err := normalizeSchedule(&req); err != nil {
+		return err
+	}
+
+	now := time.Now().UTC()
+	first, err := firstRun(&req, now, now.Add(-pickedDateGrace))
+	if err != nil {
+		return err
+	}
+	if err := endAfterRuns(&req, first); err != nil {
+		return err
+	}
+	if err := checkRunsBeforeEnd(first, req.EndAt, req.CronTimezone.String); err != nil {
+		return err
+	}
+
+	runs := []time.Time{first}
+	if req.OnDates() {
+		for _, t := range req.RunTimes {
+			if t.After(first) {
+				runs = append(runs, t)
+			}
 		}
-		log.Error().Err(err).Msg("Failed to delete scheduled message")
+	} else {
+		sched := schedule(&req)
+		for len(runs) <= previewRuns {
+			next, err := sched.Next(runs[len(runs)-1])
+			if err != nil {
+				return err
+			}
+			if req.EndAt.Valid && next.After(req.EndAt.Time) {
+				break
+			}
+			runs = append(runs, next)
+		}
+	}
+
+	more := len(runs) > previewRuns
+	if more {
+		runs = runs[:previewRuns]
+	}
+
+	return c.JSON(wire.ScheduledMessagePreviewResponseWire{
+		Success: true,
+		Data: wire.ScheduledMessagePreviewWire{
+			Runs:  runs,
+			More:  more,
+			EndAt: req.EndAt,
+		},
+	})
+}
+
+const (
+	// A month as a calendar shows it, six weeks, with some room for timezones.
+	maxRunsRange = 45 * 24 * time.Hour
+	// Enough for an hourly message to fill the six weeks, the calendar caps what it shows per day.
+	maxRunsPerMessage = 1100
+	// All messages together, about 400 KB of JSON.
+	maxRuns = 5000
+)
+
+// HandleListScheduledMessageRuns lists when the guild's scheduled messages send between the from
+// and to query parameters, for a calendar.
+func (h *ScheduledMessageHandler) HandleListScheduledMessageRuns(c *fiber.Ctx) error {
+	guildID, err := handlers.QueryID(c, "guild_id")
+	if err != nil {
+		return err
+	}
+
+	if err := h.am.CheckGuildAccessForRequest(c, guildID); err != nil {
+		return err
+	}
+
+	from, fromErr := time.Parse(time.RFC3339, c.Query("from"))
+	to, toErr := time.Parse(time.RFC3339, c.Query("to"))
+	if fromErr != nil || toErr != nil || !to.After(from) || to.Sub(from) > maxRunsRange {
+		return handlers.BadRequest("invalid_range", "The from and to times must be RFC 3339 and at most 45 days apart.")
+	}
+
+	messages, err := h.scheduledMessageStore.GetScheduledMessages(c.UserContext(), guildID)
+	if err != nil {
+		slog.Error("Failed to get scheduled messages", slog.Any("error", err))
+		return err
+	}
+
+	// Every message gets the same share, a few that send often can't push out the others.
+	enabled := 0
+	for _, msg := range messages {
+		if msg.Enabled {
+			enabled++
+		}
+	}
+	limit := min(maxRunsPerMessage, maxRuns/max(enabled, 1))
+
+	now := time.Now().UTC()
+	res := wire.ScheduledMessageRunsWire{Runs: []wire.ScheduledMessageRunWire{}}
+	for _, msg := range messages {
+		runs, more, err := scheduled_messages.UpcomingRuns(msg, from, to, limit, now)
+		if err != nil {
+			// Its schedule is broken, the manager stops it on its next run.
+			continue
+		}
+		res.Truncated = res.Truncated || more
+		for _, at := range runs {
+			res.Runs = append(res.Runs, wire.ScheduledMessageRunWire{ScheduledMessageID: msg.ID, At: at})
+		}
+	}
+
+	return c.JSON(wire.ScheduledMessageRunsResponseWire{
+		Success: true,
+		Data:    res,
+	})
+}
+
+func (h *ScheduledMessageHandler) HandleDeleteScheduledMessage(c *fiber.Ctx) error {
+	messageID := c.Params("messageID")
+	guildID, err := handlers.QueryID(c, "guild_id")
+	if err != nil {
+		return err
+	}
+
+	if err := h.am.CheckGuildAccessForRequest(c, guildID); err != nil {
+		return err
+	}
+
+	err = h.scheduledMessageStore.DeleteScheduledMessage(c.UserContext(), guildID, messageID)
+	if err != nil {
+		if errors.Is(err, store.ErrNotFound) {
+			return handlers.NotFound("unknown_message", "The scheduled message does not exist.")
+		}
+		slog.Error("Failed to delete scheduled message", slog.Any("error", err))
 		return err
 	}
 
@@ -306,25 +561,181 @@ func (h *ScheduledMessageHandler) HandleDeleteScheduledMessage(c *fiber.Ctx) err
 	})
 }
 
-func scheduledMessageModelToWire(model pgmodel.ScheduledMessage) wire.ScheduledMessageWire {
+// Stored explicitly so that edits compare equal to what was saved.
+func timezoneOrUTC(tz null.String) null.String {
+	if tz.String == "" {
+		return null.StringFrom("UTC")
+	}
+	return tz
+}
+
+// normalizeSchedule checks the schedule of a request and fills in what it leaves open.
+func normalizeSchedule(s *wire.ScheduledMessageScheduleWire) error {
+	s.CronTimezone = timezoneOrUTC(s.CronTimezone)
+
+	if s.OnlyOnce && !s.OnDates() {
+		s.RunTimes = []time.Time{s.StartAt}
+		s.CronExpression = null.String{}
+	}
+
+	if s.OnDates() {
+		// To the minute like the editor picks them, sorted and without duplicates, so the next date
+		// is the first one after the last send and they're at least a minute apart.
+		for i, d := range s.RunTimes {
+			s.RunTimes[i] = d.Truncate(time.Minute)
+		}
+		slices.SortFunc(s.RunTimes, time.Time.Compare)
+		s.RunTimes = slices.CompactFunc(s.RunTimes, time.Time.Equal)
+		s.StartAt = s.RunTimes[0]
+		s.CronInterval = 1
+		return nil
+	}
+	s.RunTimes = nil
+
+	if s.EndAt.Valid && s.EndAt.Time.Before(s.StartAt) {
+		return handlers.BadRequest("invalid_end_at", "The end_at field must be after the start_at field.")
+	}
+	// Clients from before intervals leave it out.
+	if s.CronInterval == 0 {
+		s.CronInterval = 1
+	}
+	return nil
+}
+
+func schedule(s *wire.ScheduledMessageScheduleWire) scheduled_messages.Schedule {
+	return scheduled_messages.Schedule{
+		Expression: s.CronExpression.String,
+		Timezone:   s.CronTimezone.String,
+		Interval:   s.CronInterval,
+		Anchor:     s.StartAt,
+	}
+}
+
+// Dates are picked to the minute, so one in the current minute is a little in the past by the
+// time it's saved. It still goes out.
+const pickedDateGrace = time.Minute
+
+// pendingDatesAfter is where the dates still to send start when a message on dates is edited:
+// after the last send, keeping the date it's due on. While enabled, next_at is that date, the
+// manager only moves it once the date went out or failed for good.
+func pendingDatesAfter(existing *model.ScheduledMessage, now time.Time) time.Time {
+	after := now.Add(-pickedDateGrace)
+	if existing.LastSentAt.Valid && existing.LastSentAt.Time.After(after) {
+		after = existing.LastSentAt.Time
+	}
+	if existing.Enabled && existing.OnDates() && existing.NextAt.Before(after) {
+		after = existing.NextAt.Add(-time.Nanosecond)
+	}
+	return after
+}
+
+func checkPlan(features model.PlanFeatures, s *wire.ScheduledMessageScheduleWire) error {
+	if !features.PeriodicScheduledMessages && !s.SendsOnce() {
+		return handlers.Forbidden("insufficient_plan", "Repeating scheduled messages and sending on more than one date are not available on your plan.")
+	}
+	return nil
+}
+
+// firstRun validates the schedule and returns when it first runs, not before now. Dates up to
+// datesAfter are skipped. A recurring schedule keeps a start in the past, its intervals count
+// from there.
+func firstRun(s *wire.ScheduledMessageScheduleWire, now time.Time, datesAfter time.Time) (time.Time, error) {
+	if s.OnDates() {
+		next, ok := scheduled_messages.NextDate(s.RunTimes, datesAfter)
+		if !ok {
+			return time.Time{}, handlers.BadRequest("never_runs", "All dates of the scheduled message are in the past.")
+		}
+		if next.Before(now) {
+			return now, nil
+		}
+		return next, nil
+	}
+
+	// Without seconds every run is on a different minute, so it can't run more than once a minute.
+	if segs, err := gronx.Segments(s.CronExpression.String); err == nil && segs[0] != "0" {
+		return time.Time{}, handlers.BadRequest("invalid_cron_expression", "The cron expression is too tight and will trigger too often.")
+	}
+
+	sched := schedule(s)
+	nextAt, err := sched.First(now)
+	if errors.Is(err, scheduled_messages.ErrUnsupportedInterval) {
+		return time.Time{}, handlers.BadRequest("invalid_cron_interval", "Repeating every few days, weeks or months only works with a schedule that runs at a fixed time once a minute, hour, day, week or month.")
+	}
+	if errors.Is(err, scheduled_messages.ErrNeverRuns) {
+		return time.Time{}, handlers.BadRequest("never_runs", "The schedule never runs, none of the periods it repeats in has a matching day.")
+	}
+	if err != nil {
+		return time.Time{}, handlers.BadRequest("invalid_cron_expression", "The cron expression is invalid.")
+	}
+
+	return nextAt, nil
+}
+
+// endAfterRuns turns ending after a number of sends into the end_at of the last one, counted
+// from the next send.
+func endAfterRuns(s *wire.ScheduledMessageScheduleWire, next time.Time) error {
+	if s.OnDates() || s.EndAfterRuns == 0 {
+		return nil
+	}
+
+	runs, err := schedule(s).Runs(next)
+	if err != nil {
+		return handlers.BadRequest("invalid_cron_expression", "The cron expression is invalid.")
+	}
+	last := next
+	for range s.EndAfterRuns - 1 {
+		if last, err = runs(); err != nil {
+			return handlers.BadRequest("invalid_cron_expression", "The cron expression is invalid.")
+		}
+	}
+	s.EndAt = null.TimeFrom(last)
+	return nil
+}
+
+// checkRunsBeforeEnd rejects schedules whose next run is past end_at, which the
+// manager would disable without sending.
+func checkRunsBeforeEnd(nextAt time.Time, endAt null.Time, cronTimezone string) error {
+	if !endAt.Valid || !nextAt.After(endAt.Time) {
+		return nil
+	}
+
+	loc, err := common.LoadTimezone(cronTimezone)
+	if err != nil {
+		loc = time.UTC
+	}
+
+	return handlers.BadRequest("never_runs", fmt.Sprintf(
+		"The schedule doesn't run before the end date. Its next run would be on %s (%s).",
+		nextAt.In(loc).Format("Jan 2, 2006 at 3:04 PM"),
+		loc.String(),
+	))
+}
+
+func scheduledMessageModelToWire(model *model.ScheduledMessage) wire.ScheduledMessageWire {
 	return wire.ScheduledMessageWire{
-		ID:             model.ID,
-		CreatorID:      model.CreatorID,
-		GuildID:        model.GuildID,
-		ChannelID:      model.ChannelID,
-		MessageID:      null.NewString(model.MessageID.String, model.MessageID.Valid),
-		ThreadName:     null.NewString(model.ThreadName.String, model.ThreadName.Valid),
-		SavedMessageID: model.SavedMessageID,
-		Name:           model.Name,
-		Description:    null.NewString(model.Description.String, model.Description.Valid),
-		CronExpression: null.NewString(model.CronExpression.String, model.CronExpression.Valid),
-		CronTimezone:   null.NewString(model.CronTimezone.String, model.CronTimezone.Valid),
-		StartAt:        model.StartAt,
-		EndAt:          null.NewTime(model.EndAt.Time, model.EndAt.Valid),
-		NextAt:         model.NextAt,
-		OnlyOnce:       model.OnlyOnce,
-		Enabled:        model.Enabled,
-		CreatedAt:      model.CreatedAt,
-		UpdatedAt:      model.UpdatedAt,
+		ID:                 model.ID,
+		CreatorID:          model.CreatorID,
+		GuildID:            model.GuildID,
+		ChannelID:          model.ChannelID,
+		MessageID:          model.MessageID,
+		ThreadName:         model.ThreadName,
+		Crosspost:          model.Crosspost,
+		SavedMessageID:     model.SavedMessageID,
+		Name:               model.Name,
+		Description:        model.Description,
+		CronExpression:     model.CronExpression,
+		CronTimezone:       model.CronTimezone,
+		CronInterval:       model.CronInterval,
+		StartAt:            model.StartAt,
+		EndAt:              model.EndAt,
+		NextAt:             model.NextAt,
+		RunTimes:           model.RunTimes,
+		Enabled:            model.Enabled,
+		CreatedAt:          model.CreatedAt,
+		UpdatedAt:          model.UpdatedAt,
+		LastSentAt:         model.LastSentAt,
+		LastError:          model.LastError,
+		LastErrorAt:        model.LastErrorAt,
+		LastCrosspostError: model.LastCrosspostError,
 	}
 }

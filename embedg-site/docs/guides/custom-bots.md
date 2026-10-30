@@ -1,8 +1,12 @@
 ---
-sidebar_position: 4
+sidebar_position: 5
+description: "Step by step: create a Discord application, add the bot to Embed Generator, invite it, set the interaction endpoint and a custom status. Needed for white label and custom commands."
+sidebar_class_name: sidebar-premium
 ---
 
 # Custom Bots
+
+<span className="premium-badge">Premium</span>
 
 Custom Bots allow you to change the username and avatar for interactive component responses and make it appear in your member list.
 
@@ -20,7 +24,7 @@ Click on "New Application" and give your Application a name. This is the usernam
 
 Once you are happy with the appearance of Custom Bot continue by clicking on "Bot" on the left side of the screen. Here you can grab the token for your Application by clicking on "Reset Token". Once you have the token you are done on Discord Developer Portal and you can go back to the [Settings page](https://message.style/app/settings) on message.style.
 
-![Custom Bot Developer Portal](./custom-bots-devportal.png)
+![Custom Bot Developer Portal](./custom-bots-devportal.webp)
 
 ### Adding The Custom Bot
 
@@ -30,7 +34,7 @@ You will see a few tasks that have to be done before your Custom Bot can be used
 
 ### Inviting The Custom Bot
 
-First you have to invite the Custom Bot to your Discord server. You can easily do that by clicking on the "Invite Bot" button. Make sure to keep the "Manage Webhooks" and "Manage Roles" permissions selected for your Custom Bot to work properly.
+First you have to invite the Custom Bot to your Discord server. You can easily do that by clicking on the "Invite Bot" button. Make sure to keep the "Manage Webhooks", "Manage Roles" and "Manage Messages" permissions selected for your Custom Bot to work properly. It needs "Manage Messages" to publish scheduled messages in announcement channels.
 
 ### Setting The Interaction Endpoint
 
@@ -44,7 +48,7 @@ Once all of this is done your Custom Bot should work and will be used to respond
 
 For even most customizability you can set a Custom Status for your Custom Bot. You can select a status (e.g. online or Do Not Disturb) and set a status message that will appear in the member list on your server.
 
-![Configure Custom Bot](./custom-bots-configure.png)
+![Configure Custom Bot](./custom-bots-configure.webp)
 
 ## Caveats & Limitations
 

@@ -1,22 +1,71 @@
 import { themes as prismThemes } from "prism-react-renderer";
 import type { Config } from "@docusaurus/types";
 import type * as Preset from "@docusaurus/preset-classic";
+import componentEmbeds from "./plugins/component-embeds";
 
 const config: Config = {
-  title: "Embed Generator | Discord embeds without the hassle",
+  title: "Embed Generator",
   tagline: "The best way to create Discord embeds!",
-  favicon: "img/logo.svg",
+  // Search engines and DuckDuckGo look for /favicon.ico and skip SVG icons.
+  favicon: "favicon.ico",
 
   // Set the production url of your site here
   url: "https://message.style",
   // Set the /<baseUrl>/ pathname under which your site is served
   // For GitHub pages deployment, it is often '/<projectName>/'
   baseUrl: "/",
+  // Pages build as foo.html, which Caddy and the embedded server serve at /foo.
+  trailingSlash: false,
 
   // GitHub pages deployment config.
   // If you aren't using GitHub pages, you don't need these.
   organizationName: "merlinfuchs", // Usually your GitHub org/user name.
   projectName: "embed-generator", // Usually your repo name.
+
+  headTags: [
+    {
+      tagName: "link",
+      attributes: {
+        rel: "icon",
+        type: "image/svg+xml",
+        href: "/img/logo.svg",
+      },
+    },
+    {
+      tagName: "link",
+      attributes: {
+        rel: "icon",
+        type: "image/png",
+        sizes: "192x192",
+        href: "/img/logo-192.png",
+      },
+    },
+    {
+      tagName: "script",
+      attributes: { type: "application/ld+json" },
+      innerHTML: JSON.stringify({
+        "@context": "https://schema.org",
+        "@type": "SoftwareApplication",
+        name: "Embed Generator",
+        url: "https://message.style",
+        applicationCategory: "UtilitiesApplication",
+        operatingSystem: "Web",
+        description:
+          "Visual editor for Discord embeds, buttons and select menus. Send messages through webhooks or a bot, save them, schedule them.",
+        offers: [
+          { "@type": "Offer", price: "0", priceCurrency: "USD", name: "Free" },
+          {
+            "@type": "Offer",
+            price: "4.99",
+            priceCurrency: "USD",
+            name: "Premium",
+            description: "Per server, monthly",
+          },
+        ],
+        author: { "@type": "Person", name: "Merlin Fuchs" },
+      }),
+    },
+  ],
 
   onBrokenLinks: "throw",
   onBrokenMarkdownLinks: "warn",
@@ -48,6 +97,18 @@ const config: Config = {
           editUrl:
             "https://github.com/merlinfuchs/embed-generator/tree/main/embedg-site/",
         },
+        sitemap: {
+          ignorePatterns: [
+            "/blog/tags/**",
+            "/blog/archive",
+            "/blog/authors",
+            // noindex, see src/pages
+            "/cookies",
+            "/imprint",
+            "/privacy",
+            "/terms",
+          ],
+        },
         theme: {
           customCss: require.resolve("./src/css/global.css"),
         },
@@ -65,30 +126,27 @@ const config: Config = {
             "Create embed messages for your Discord server with ease and give them your own branding using webhooks.",
         },
         {
-          name: "og:description",
-          content:
-            "Create embed messages for your Discord server with ease and give them your own branding using webhooks.",
-        },
-        {
           name: "og:site_name",
           content: "message.style",
         },
         {
           name: "twitter:card",
-          content: "summary",
+          content: "summary_large_image",
         },
         {
           name: "theme-color",
-          content: "#237feb",
+          content: "#1e1f22",
         },
       ],
 
       colorMode: {
         defaultMode: "dark",
+        disableSwitch: true,
+        respectPrefersColorScheme: false,
       },
 
       // Replace with your project's social card
-      image: "img/logo-256.png",
+      image: "img/og.png",
       navbar: {
         title: "Embed Generator",
         logo: {
@@ -98,21 +156,36 @@ const config: Config = {
         },
         items: [
           {
+            to: "features",
+            label: "Features",
+            position: "left",
+          },
+          {
             type: "docSidebar",
             sidebarId: "tutorialSidebar",
             position: "left",
-            label: "Tutorial",
+            label: "Docs",
           },
           {
             to: "blog",
             label: "Blog",
             position: "left",
           },
-          // { to: "/blog", label: "Blog", position: "left" },
+          {
+            href: "https://message.style/discord",
+            label: "Discord",
+            position: "right",
+          },
           {
             href: "https://github.com/merlinfuchs/embed-generator",
             label: "GitHub",
             position: "right",
+          },
+          {
+            href: "https://message.style/app/editor",
+            label: "Open App",
+            position: "right",
+            className: "navbar__item--cta",
           },
         ],
       },
@@ -120,12 +193,17 @@ const config: Config = {
         style: "dark",
         links: [
           {
-            title: "Docs",
+            title: "Product",
             items: [
-              {
-                label: "Tutorial",
-                to: "/docs",
-              },
+              { label: "Open App", href: "https://message.style/app/editor" },
+              { label: "Premium", href: "https://message.style/premium" },
+              { label: "Documentation", to: "/docs" },
+              { label: "Blog", to: "/blog" },
+              { label: "Discord Webhook Sender", to: "/features/discord-webhooks" },
+              { label: "Scheduled Messages", to: "/features/scheduled-messages" },
+              { label: "Components V2", to: "/features/components-v2" },
+              { label: "Buttons & Role Menus", to: "/features/interactive-components" },
+              { label: "All Features", to: "/features" },
             ],
           },
           {
@@ -139,6 +217,10 @@ const config: Config = {
                 label: "Discord",
                 href: "https://message.style/discord",
               },
+              {
+                label: "Status",
+                href: "https://status.message.style",
+              },
             ],
           },
           {
@@ -150,7 +232,19 @@ const config: Config = {
               },
               {
                 label: "Privacy Policy",
-                href: "/privacy",
+                to: "/privacy",
+              },
+              {
+                label: "Cookies",
+                to: "/cookies",
+              },
+              {
+                label: "Imprint",
+                to: "/imprint",
+              },
+              {
+                label: "Cookies",
+                to: "/cookies",
               },
             ],
           },
@@ -164,6 +258,7 @@ const config: Config = {
     } satisfies Preset.ThemeConfig,
 
   plugins: [
+    componentEmbeds,
     async function myPlugin(context, options) {
       return {
         name: "docusaurus-tailwindcss",
@@ -176,6 +271,8 @@ const config: Config = {
       };
     },
   ],
+
+  clientModules: ["./src/analytics.ts"],
 };
 
 module.exports = config;

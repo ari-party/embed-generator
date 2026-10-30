@@ -1,58 +1,65 @@
 package saved_messages
 
 import (
-	"database/sql"
+	"context"
+	"encoding/json"
+	"errors"
 	"time"
 
+	"log/slog"
+
 	"github.com/gofiber/fiber/v2"
-	"github.com/merlinfuchs/embed-generator/embedg-server/api/access"
-	"github.com/merlinfuchs/embed-generator/embedg-server/api/helpers"
+	"github.com/merlinfuchs/embed-generator/embedg-server/access"
+	"github.com/merlinfuchs/embed-generator/embedg-server/actions"
+	"github.com/merlinfuchs/embed-generator/embedg-server/api/handlers"
 	"github.com/merlinfuchs/embed-generator/embedg-server/api/session"
 	"github.com/merlinfuchs/embed-generator/embedg-server/api/wire"
-	"github.com/merlinfuchs/embed-generator/embedg-server/db/postgres"
-	"github.com/merlinfuchs/embed-generator/embedg-server/db/postgres/pgmodel"
-	"github.com/merlinfuchs/embed-generator/embedg-server/util"
-	"github.com/rs/zerolog/log"
-	"gopkg.in/guregu/null.v4"
+	"github.com/merlinfuchs/embed-generator/embedg-server/common"
+	"github.com/merlinfuchs/embed-generator/embedg-server/model"
+	"github.com/merlinfuchs/embed-generator/embedg-server/store"
 )
 
 type SavedMessagesHandler struct {
-	pg *postgres.PostgresStore
-	am *access.AccessManager
+	savedMessageStore store.SavedMessageStore
+	am                *access.AccessManager
+	planStore         store.PlanStore
 }
 
-func New(pg *postgres.PostgresStore, am *access.AccessManager) *SavedMessagesHandler {
+func New(savedMessageStore store.SavedMessageStore, am *access.AccessManager, planStore store.PlanStore) *SavedMessagesHandler {
 	return &SavedMessagesHandler{
-		pg: pg,
-		am: am,
+		savedMessageStore: savedMessageStore,
+		am:                am,
+		planStore:         planStore,
 	}
 }
 
 func (h *SavedMessagesHandler) HandleListSavedMessages(c *fiber.Ctx) error {
 	session := c.Locals("session").(*session.Session)
 
-	guildID := c.Query("guild_id")
+	guildID, err := handlers.QueryNullID(c, "guild_id")
+	if err != nil {
+		return err
+	}
 
-	var messages []pgmodel.SavedMessage
-	var err error
+	var messages []model.SavedMessage
 
-	if guildID != "" {
-		if err := h.am.CheckGuildAccessForRequest(c, guildID); err != nil {
+	if guildID.Valid {
+		if err := h.am.CheckGuildAccessForRequest(c, guildID.ID); err != nil {
 			return err
 		}
-		messages, err = h.pg.Q.GetSavedMessagesForGuild(c.Context(), sql.NullString{String: guildID, Valid: true})
+		messages, err = h.savedMessageStore.GetSavedMessagesForGuild(c.UserContext(), guildID.ID)
 	} else {
-		messages, err = h.pg.Q.GetSavedMessagesForCreator(c.Context(), session.UserID)
+		messages, err = h.savedMessageStore.GetSavedMessagesForCreator(c.UserContext(), session.UserID)
 	}
 
 	if err != nil {
-		log.Error().Err(err).Msg("Failed to get saved messages")
+		slog.Error("Failed to get saved messages", slog.Any("error", err))
 		return err
 	}
 
 	res := make([]wire.SavedMessageWire, len(messages))
 	for i, message := range messages {
-		res[i] = savedMessageModelToWire(message)
+		res[i] = savedMessageModelToWire(&message)
 	}
 
 	return c.JSON(wire.SavedMessageListResponseWire{
@@ -63,25 +70,39 @@ func (h *SavedMessagesHandler) HandleListSavedMessages(c *fiber.Ctx) error {
 
 func (h *SavedMessagesHandler) HandleCreateSavedMessage(c *fiber.Ctx, req wire.SavedMessageCreateRequestWire) error {
 	session := c.Locals("session").(*session.Session)
-	guildID := c.Query("guild_id")
+	guildID, err := handlers.QueryNullID(c, "guild_id")
+	if err != nil {
+		return err
+	}
 
-	if guildID != "" {
-		if err := h.am.CheckGuildAccessForRequest(c, guildID); err != nil {
+	if guildID.Valid {
+		if err := h.am.CheckGuildAccessForRequest(c, guildID.ID); err != nil {
 			return err
 		}
 	}
 
-	message, err := h.pg.Q.InsertSavedMessage(c.Context(), pgmodel.InsertSavedMessageParams{
-		ID:          util.UniqueID(),
+	features, err := h.planFeatures(c.UserContext(), session.UserID, guildID)
+	if err != nil {
+		return err
+	}
+	if err := h.checkSavedMessageLimit(c.UserContext(), features, session.UserID, guildID, 1); err != nil {
+		return err
+	}
+	if err := checkActionMessages(features, req.Data); err != nil {
+		return err
+	}
+
+	message, err := h.savedMessageStore.CreateSavedMessage(c.UserContext(), model.SavedMessage{
+		ID:          common.InternalID(),
 		CreatorID:   session.UserID,
-		GuildID:     sql.NullString{String: guildID, Valid: guildID != ""},
+		GuildID:     guildID,
 		UpdatedAt:   time.Now().UTC(),
 		Name:        req.Name,
-		Description: sql.NullString{String: req.Description.String, Valid: req.Description.Valid},
+		Description: req.Description,
 		Data:        req.Data,
 	})
 	if err != nil {
-		log.Error().Err(err).Msg("Failed to create saved message")
+		slog.Error("Failed to create saved message", slog.Any("error", err))
 		return err
 	}
 
@@ -94,41 +115,52 @@ func (h *SavedMessagesHandler) HandleCreateSavedMessage(c *fiber.Ctx, req wire.S
 func (h *SavedMessagesHandler) HandleUpdateSavedMessage(c *fiber.Ctx, req wire.SavedMessageUpdateRequestWire) error {
 	session := c.Locals("session").(*session.Session)
 	messageID := c.Params("messageID")
-	guildID := c.Query("guild_id")
+	guildID, err := handlers.QueryNullID(c, "guild_id")
+	if err != nil {
+		return err
+	}
 
-	if guildID != "" {
-		if err := h.am.CheckGuildAccessForRequest(c, guildID); err != nil {
+	if guildID.Valid {
+		if err := h.am.CheckGuildAccessForRequest(c, guildID.ID); err != nil {
 			return err
 		}
 	}
 
-	var message pgmodel.SavedMessage
-	var err error
-	if guildID != "" {
-		message, err = h.pg.Q.UpdateSavedMessageForGuild(c.Context(), pgmodel.UpdateSavedMessageForGuildParams{
-			ID:          messageID,
-			GuildID:     sql.NullString{String: guildID, Valid: true},
-			UpdatedAt:   time.Now().UTC(),
-			Name:        req.Name,
-			Description: sql.NullString{String: req.Description.String, Valid: req.Description.Valid},
-			Data:        req.Data,
-		})
+	update := model.SavedMessage{
+		ID:          messageID,
+		CreatorID:   session.UserID,
+		GuildID:     guildID,
+		UpdatedAt:   time.Now().UTC(),
+		Name:        req.Name,
+		Description: req.Description,
+		Data:        req.Data,
+	}
+
+	// Renames leave the data as it is, so there are no versions to keep.
+	var keepVersions int
+	if req.Data != nil {
+		features, err := h.planFeatures(c.UserContext(), session.UserID, guildID)
+		if err != nil {
+			return err
+		}
+		if err := checkActionMessages(features, req.Data); err != nil {
+			return err
+		}
+		keepVersions = features.MaxSavedMessageVersions
+	}
+
+	var message *model.SavedMessage
+	if guildID.Valid {
+		message, err = h.savedMessageStore.UpdateSavedMessageForGuild(c.UserContext(), update, keepVersions)
 	} else {
-		message, err = h.pg.Q.UpdateSavedMessageForCreator(c.Context(), pgmodel.UpdateSavedMessageForCreatorParams{
-			ID:          messageID,
-			CreatorID:   session.UserID,
-			UpdatedAt:   time.Now().UTC(),
-			Name:        req.Name,
-			Description: sql.NullString{String: req.Description.String, Valid: req.Description.Valid},
-			Data:        req.Data,
-		})
+		message, err = h.savedMessageStore.UpdateSavedMessageForCreator(c.UserContext(), update, keepVersions)
 	}
 
 	if err != nil {
-		if err == sql.ErrNoRows {
-			return helpers.NotFound("unknown_message", "The message does not exist.")
+		if errors.Is(err, store.ErrNotFound) {
+			return handlers.NotFound("unknown_message", "The message does not exist.")
 		}
-		log.Error().Err(err).Msg("Failed to update saved message")
+		slog.Error("Failed to update saved message", slog.Any("error", err))
 		return err
 	}
 
@@ -141,32 +173,28 @@ func (h *SavedMessagesHandler) HandleUpdateSavedMessage(c *fiber.Ctx, req wire.S
 func (h *SavedMessagesHandler) HandleDeleteSavedMessage(c *fiber.Ctx) error {
 	session := c.Locals("session").(*session.Session)
 	messageID := c.Params("messageID")
-	guildID := c.Query("guild_id")
+	guildID, err := handlers.QueryNullID(c, "guild_id")
+	if err != nil {
+		return err
+	}
 
-	if guildID != "" {
-		if err := h.am.CheckGuildAccessForRequest(c, guildID); err != nil {
+	if guildID.Valid {
+		if err := h.am.CheckGuildAccessForRequest(c, guildID.ID); err != nil {
 			return err
 		}
 	}
 
-	var err error
-	if guildID != "" {
-		err = h.pg.Q.DeleteSavedMessageForGuild(c.Context(), pgmodel.DeleteSavedMessageForGuildParams{
-			ID:      messageID,
-			GuildID: sql.NullString{String: guildID, Valid: true},
-		})
+	if guildID.Valid {
+		err = h.savedMessageStore.DeleteSavedMessageForGuild(c.UserContext(), guildID.ID, messageID)
 	} else {
-		err = h.pg.Q.DeleteSavedMessageForCreator(c.Context(), pgmodel.DeleteSavedMessageForCreatorParams{
-			ID:        messageID,
-			CreatorID: session.UserID,
-		})
+		err = h.savedMessageStore.DeleteSavedMessageForCreator(c.UserContext(), session.UserID, messageID)
 	}
 
 	if err != nil {
-		if err == sql.ErrNoRows {
-			return helpers.NotFound("unknown_message", "The message does not exist.")
+		if errors.Is(err, store.ErrNotFound) {
+			return handlers.NotFound("unknown_message", "The message does not exist.")
 		}
-		log.Error().Err(err).Msg("Failed to delete saved message")
+		slog.Error("Failed to delete saved message", slog.Any("error", err))
 		return err
 	}
 
@@ -178,10 +206,26 @@ func (h *SavedMessagesHandler) HandleDeleteSavedMessage(c *fiber.Ctx) error {
 
 func (h *SavedMessagesHandler) HandleImportSavedMessages(c *fiber.Ctx, req wire.SavedMessagesImportRequestWire) error {
 	session := c.Locals("session").(*session.Session)
-	guildID := c.Query("guild_id")
+	guildID, err := handlers.QueryNullID(c, "guild_id")
+	if err != nil {
+		return err
+	}
 
-	if guildID != "" {
-		if err := h.am.CheckGuildAccessForRequest(c, guildID); err != nil {
+	if guildID.Valid {
+		if err := h.am.CheckGuildAccessForRequest(c, guildID.ID); err != nil {
+			return err
+		}
+	}
+
+	features, err := h.planFeatures(c.UserContext(), session.UserID, guildID)
+	if err != nil {
+		return err
+	}
+	if err := h.checkSavedMessageLimit(c.UserContext(), features, session.UserID, guildID, len(req.Messages)); err != nil {
+		return err
+	}
+	for _, msg := range req.Messages {
+		if err := checkActionMessages(features, msg.Data); err != nil {
 			return err
 		}
 	}
@@ -189,17 +233,17 @@ func (h *SavedMessagesHandler) HandleImportSavedMessages(c *fiber.Ctx, req wire.
 	res := make([]wire.SavedMessageWire, len(req.Messages))
 
 	for i, msg := range req.Messages {
-		message, err := h.pg.Q.InsertSavedMessage(c.Context(), pgmodel.InsertSavedMessageParams{
-			ID:          util.UniqueID(),
+		message, err := h.savedMessageStore.CreateSavedMessage(c.UserContext(), model.SavedMessage{
+			ID:          common.InternalID(),
 			CreatorID:   session.UserID,
-			GuildID:     sql.NullString{String: guildID, Valid: guildID != ""},
+			GuildID:     guildID,
 			UpdatedAt:   time.Now().UTC(),
 			Name:        msg.Name,
-			Description: sql.NullString{String: msg.Description.String, Valid: msg.Description.Valid},
+			Description: msg.Description,
 			Data:        msg.Data,
 		})
 		if err != nil {
-			log.Error().Err(err).Msg("Failed to create saved message")
+			slog.Error("Failed to create saved message", slog.Any("error", err))
 			return err
 		}
 		res[i] = savedMessageModelToWire(message)
@@ -211,14 +255,162 @@ func (h *SavedMessagesHandler) HandleImportSavedMessages(c *fiber.Ctx, req wire.
 	})
 }
 
-func savedMessageModelToWire(model pgmodel.SavedMessage) wire.SavedMessageWire {
+func (h *SavedMessagesHandler) HandleListSavedMessageVersions(c *fiber.Ctx) error {
+	session := c.Locals("session").(*session.Session)
+	messageID := c.Params("messageID")
+	guildID, err := handlers.QueryNullID(c, "guild_id")
+	if err != nil {
+		return err
+	}
+
+	if guildID.Valid {
+		if err := h.am.CheckGuildAccessForRequest(c, guildID.ID); err != nil {
+			return err
+		}
+	}
+
+	features, err := h.planFeatures(c.UserContext(), session.UserID, guildID)
+	if err != nil {
+		return err
+	}
+
+	var versions []model.SavedMessageVersion
+	if guildID.Valid {
+		versions, err = h.savedMessageStore.GetSavedMessageVersionsForGuild(c.UserContext(), guildID.ID, messageID, features.MaxSavedMessageVersions)
+	} else {
+		versions, err = h.savedMessageStore.GetSavedMessageVersionsForCreator(c.UserContext(), session.UserID, messageID, features.MaxSavedMessageVersions)
+	}
+	if err != nil {
+		slog.Error("Failed to get saved message versions", slog.Any("error", err))
+		return err
+	}
+
+	res := make([]wire.SavedMessageVersionWire, len(versions))
+	for i, version := range versions {
+		res[i] = savedMessageVersionModelToWire(&version)
+	}
+
+	return c.JSON(wire.SavedMessageVersionListResponseWire{
+		Success: true,
+		Data:    res,
+	})
+}
+
+func (h *SavedMessagesHandler) HandleGetSavedMessageVersion(c *fiber.Ctx) error {
+	session := c.Locals("session").(*session.Session)
+	messageID := c.Params("messageID")
+	versionID := c.Params("versionID")
+	guildID, err := handlers.QueryNullID(c, "guild_id")
+	if err != nil {
+		return err
+	}
+
+	if guildID.Valid {
+		if err := h.am.CheckGuildAccessForRequest(c, guildID.ID); err != nil {
+			return err
+		}
+	}
+
+	features, err := h.planFeatures(c.UserContext(), session.UserID, guildID)
+	if err != nil {
+		return err
+	}
+	if features.MaxSavedMessageVersions == 0 {
+		return handlers.Forbidden("insufficient_plan", "Your plan doesn't keep versions of saved messages.")
+	}
+
+	var version *model.SavedMessageVersion
+	if guildID.Valid {
+		version, err = h.savedMessageStore.GetSavedMessageVersionForGuild(c.UserContext(), guildID.ID, messageID, versionID)
+	} else {
+		version, err = h.savedMessageStore.GetSavedMessageVersionForCreator(c.UserContext(), session.UserID, messageID, versionID)
+	}
+	if err != nil {
+		if errors.Is(err, store.ErrNotFound) {
+			return handlers.NotFound("unknown_version", "The version does not exist.")
+		}
+		slog.Error("Failed to get saved message version", slog.Any("error", err))
+		return err
+	}
+
+	return c.JSON(wire.SavedMessageVersionGetResponseWire{
+		Success: true,
+		Data: wire.SavedMessageVersionDataWire{
+			SavedMessageVersionWire: savedMessageVersionModelToWire(version),
+			Data:                    version.Data,
+		},
+	})
+}
+
+// planFeatures returns the plan of the guild, or of the user for their personal messages.
+func (h *SavedMessagesHandler) planFeatures(ctx context.Context, userID common.ID, guildID common.NullID) (model.PlanFeatures, error) {
+	if guildID.Valid {
+		return h.planStore.GetPlanFeaturesForGuild(ctx, guildID.ID)
+	}
+	return h.planStore.GetPlanFeaturesForUser(ctx, userID)
+}
+
+// checkSavedMessageLimit checks that adding messages stays within the plan of the guild, or of the
+// user for their personal messages.
+func (h *SavedMessagesHandler) checkSavedMessageLimit(ctx context.Context, features model.PlanFeatures, userID common.ID, guildID common.NullID, adding int) error {
+	var existing int64
+	var err error
+	if guildID.Valid {
+		existing, err = h.savedMessageStore.CountSavedMessagesForGuild(ctx, guildID.ID)
+	} else {
+		existing, err = h.savedMessageStore.CountSavedMessagesForCreator(ctx, userID)
+	}
+	if err != nil {
+		return err
+	}
+
+	if int(existing)+adding > features.MaxSavedMessages {
+		return handlers.Forbidden("insufficient_plan", "You have reached the maximum number of saved messages for your plan!")
+	}
+	return nil
+}
+
+// checkActionMessages checks the response messages that actions in the message carry themselves.
+// A saved message brings its actions along when it's sent or used as a response, so they're
+// checked when it's saved like they are when a message is sent.
+func checkActionMessages(features model.PlanFeatures, data json.RawMessage) error {
+	if len(data) == 0 {
+		return nil
+	}
+
+	var msg struct {
+		Actions map[string]actions.ActionSet `json:"actions"`
+	}
+	// Saved messages have always been stored as they come. One whose actions don't decode can't
+	// run them either, sent or as a response, so there's nothing to check.
+	if err := json.Unmarshal(data, &msg); err != nil {
+		return nil
+	}
+
+	for _, actionSet := range msg.Actions {
+		if err := handlers.CheckActionMessages(actionSet, features); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func savedMessageModelToWire(model *model.SavedMessage) wire.SavedMessageWire {
 	return wire.SavedMessageWire{
 		ID:          model.ID,
 		CreatorID:   model.CreatorID,
-		GuildID:     null.NewString(model.GuildID.String, model.GuildID.Valid),
+		GuildID:     model.GuildID,
 		UpdatedAt:   model.UpdatedAt,
 		Name:        model.Name,
-		Description: null.NewString(model.Description.String, model.Description.Valid),
+		Description: model.Description,
 		Data:        model.Data,
+	}
+}
+
+func savedMessageVersionModelToWire(model *model.SavedMessageVersion) wire.SavedMessageVersionWire {
+	return wire.SavedMessageVersionWire{
+		ID:        model.ID,
+		CreatedAt: model.CreatedAt,
+		Name:      model.Name,
 	}
 }

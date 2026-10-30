@@ -3,85 +3,103 @@ package send_message
 import (
 	"bytes"
 	"encoding/json"
+	"errors"
 	"fmt"
 
+	"log/slog"
+
+	"github.com/disgoorg/disgo/discord"
+	"github.com/disgoorg/disgo/rest"
 	"github.com/gofiber/fiber/v2"
-	"github.com/merlinfuchs/discordgo"
+	"github.com/merlinfuchs/embed-generator/embedg-server/access"
 	"github.com/merlinfuchs/embed-generator/embedg-server/actions"
 	"github.com/merlinfuchs/embed-generator/embedg-server/actions/parser"
 	"github.com/merlinfuchs/embed-generator/embedg-server/actions/template"
-	"github.com/merlinfuchs/embed-generator/embedg-server/api/access"
-	"github.com/merlinfuchs/embed-generator/embedg-server/api/helpers"
+	"github.com/merlinfuchs/embed-generator/embedg-server/api/handlers"
 	"github.com/merlinfuchs/embed-generator/embedg-server/api/session"
 	"github.com/merlinfuchs/embed-generator/embedg-server/api/wire"
-	"github.com/merlinfuchs/embed-generator/embedg-server/bot"
-	"github.com/merlinfuchs/embed-generator/embedg-server/db/postgres"
+	"github.com/merlinfuchs/embed-generator/embedg-server/common"
+	"github.com/merlinfuchs/embed-generator/embedg-server/guildstate"
+	"github.com/merlinfuchs/embed-generator/embedg-server/manager/webhook"
+	"github.com/merlinfuchs/embed-generator/embedg-server/model"
 	"github.com/merlinfuchs/embed-generator/embedg-server/store"
-	"github.com/merlinfuchs/embed-generator/embedg-server/util"
-	"github.com/rs/zerolog/log"
 	"github.com/vincent-petithory/dataurl"
 )
 
 type SendMessageHandler struct {
-	bot           *bot.Bot
-	pg            *postgres.PostgresStore
-	accessManager *access.AccessManager
-	actionParser  *parser.ActionParser
-	planStore     store.PlanStore
+	rest           rest.Rest
+	fluxer         *fluxerClient
+	guildState     *guildstate.Provider
+	kvEntryStore   store.KVEntryStore
+	webhookManager *webhook.WebhookManager
+	accessManager  *access.AccessManager
+	actionParser   *parser.ActionParser
+	planStore      store.PlanStore
 }
 
 func New(
-	bot *bot.Bot,
-	pg *postgres.PostgresStore,
+	rest rest.Rest,
+	guildState *guildstate.Provider,
+	kvEntryStore store.KVEntryStore,
+	webhookManager *webhook.WebhookManager,
 	accessManager *access.AccessManager,
 	actionParser *parser.ActionParser,
 	planStore store.PlanStore,
 ) *SendMessageHandler {
 	return &SendMessageHandler{
-		bot:           bot,
-		pg:            pg,
-		accessManager: accessManager,
-		actionParser:  actionParser,
-		planStore:     planStore,
+		rest:           rest,
+		fluxer:         newFluxerClient(fluxerAPIURL),
+		guildState:     guildState,
+		kvEntryStore:   kvEntryStore,
+		webhookManager: webhookManager,
+		accessManager:  accessManager,
+		actionParser:   actionParser,
+		planStore:      planStore,
 	}
 }
 
 func (h *SendMessageHandler) HandleSendMessageToChannel(c *fiber.Ctx, req wire.MessageSendToChannelRequestWire) error {
 	session := c.Locals("session").(*session.Session)
 
-	if err := h.accessManager.CheckChannelAccessForRequest(c, req.ChannelID); err != nil {
+	channel, err := h.accessManager.CheckChannelAccessForRequestInGuild(c, req.ChannelID, req.GuildID)
+	if err != nil {
 		return err
 	}
 
-	channel, err := h.bot.State.Channel(req.ChannelID)
-	if err != nil {
-		return fmt.Errorf("Failed to get channel: %w", err)
-	}
-
-	features, err := h.planStore.GetPlanFeaturesForGuild(c.Context(), channel.GuildID)
+	features, err := h.planStore.GetPlanFeaturesForGuild(c.UserContext(), channel.GuildID())
 	if err != nil {
 		return fmt.Errorf("could not get plan features: %w", err)
 	}
 
+	templateSource := template.NewSource(c.UserContext(), h.guildState)
 	templates := template.NewContext(
 		"SEND_MESSAGE", features.MaxTemplateOps,
-		template.NewGuildProvider(h.bot.State, channel.GuildID, nil),
-		template.NewChannelProvider(h.bot.State, req.ChannelID, nil),
-		template.NewKVProvider(channel.GuildID, h.pg, features.MaxKVKeys),
+		template.NewGuildProvider(templateSource, channel.GuildID(), nil),
+		template.NewChannelProvider(templateSource, req.ChannelID, channel),
+		template.NewKVProvider(templateSource, channel.GuildID(), h.kvEntryStore, features.MaxKVKeys),
 	)
 
 	data := &actions.MessageWithActions{}
 	err = json.Unmarshal([]byte(req.Data), data)
 	if err != nil {
+		return invalidMessage(err)
+	}
+
+	if err := checkMessageLimits(data, features); err != nil {
 		return err
 	}
 
+	// Unless a lookup behind it failed, a template that fails here is the user's to fix, like
+	// using .Interaction in a message that isn't sent in response to one.
 	err = templates.ParseAndExecuteMessage(data)
 	if err != nil {
-		return fmt.Errorf("Failed to parse and execute message template: %w", err)
+		if internalErr := templateSource.Err(); internalErr != nil {
+			return fmt.Errorf("failed to render message template: %w", internalErr)
+		}
+		return handlers.BadRequest("invalid_template", fmt.Sprintf("Failed to render a variable in the message: %v", err))
 	}
 
-	params := &discordgo.WebhookParams{
+	params := discord.WebhookMessageCreate{
 		Username:        data.Username,
 		AvatarURL:       data.AvatarURL,
 		ThreadName:      req.ThreadName.String,
@@ -94,55 +112,53 @@ func (h *SendMessageHandler) HandleSendMessageToChannel(c *fiber.Ctx, req wire.M
 		params.TTS = data.TTS
 	}
 
-	attachments := make([]*discordgo.MessageAttachment, len(req.Attachments))
-
-	for i, attachment := range req.Attachments {
-		dataURL, err := dataurl.DecodeString(attachment.DataURL)
-		if err != nil {
-			return helpers.BadRequest("invalid_attachments", "Failed to parse attachment data URL")
-		}
-
-		params.Files = append(params.Files, &discordgo.File{
-			Name:        attachment.Name,
-			ContentType: dataURL.ContentType(),
-			Reader:      bytes.NewReader(dataURL.Data),
-		})
-
-		attachments[i] = &discordgo.MessageAttachment{
-			ID: fmt.Sprintf("%d", i),
-		}
-	}
-
-	params.Components, err = h.actionParser.ParseMessageComponents(data.Components, features.ComponentTypes)
+	params.Files, err = decodeAttachments(req.Attachments)
 	if err != nil {
-		return helpers.BadRequest("invalid_actions", err.Error())
+		return err
 	}
 
-	var msg *discordgo.Message
+	params.Components, err = h.actionParser.ParseMessageComponents(data.Components, true)
+	if err != nil {
+		return handlers.BadRequest("invalid_actions", err.Error())
+	}
+
+	// Derived before sending, so a failure doesn't leave a sent message without its actions.
+	member, err := h.accessManager.GetMemberForUser(c.UserContext(), session, req.GuildID)
+	if err != nil {
+		return fmt.Errorf("Failed to get member: %w", err)
+	}
+
+	permContext, err := h.actionParser.DerivePermissionsForActions(c.UserContext(), *member, req.GuildID, req.ChannelID)
+	if err != nil {
+		return fmt.Errorf("Failed to create permission context: %w", err)
+	}
+
+	var msg *discord.Message
 	if req.MessageID.Valid {
-		msg, err = h.bot.EditMessageInChannel(c.Context(), req.ChannelID, req.MessageID.String, &discordgo.WebhookEdit{
+		msg, err = h.webhookManager.UpdateMessageInChannel(c.UserContext(), req.ChannelID, req.MessageID.ID, discord.WebhookMessageUpdate{
 			Content:         &params.Content,
 			Embeds:          &params.Embeds,
 			Components:      &params.Components,
 			AllowedMentions: params.AllowedMentions,
 			Files:           params.Files,
-			Attachments:     &attachments,
+			Flags:           data.EditFlags(),
 		})
 	} else {
-		msg, err = h.bot.SendMessageToChannel(c.Context(), req.ChannelID, params)
+		msg, err = h.webhookManager.SendMessageToChannel(c.UserContext(), req.ChannelID, params)
 	}
 	if err != nil {
-		return fmt.Errorf("Failed to send message: %w", err)
+		if common.IsDiscordRestErrorCode(err, rest.JSONErrorCodeUnknownMessage) {
+			return handlers.NotFound("unknown_message", "The message to edit does not exist.")
+		}
+		if editsComponentsV2ToLegacy(err) {
+			return componentsV2EditError
+		}
+		return fmt.Errorf("Failed to send or edit message: %w", err)
 	}
 
-	permContext, err := h.actionParser.DerivePermissionsForActions(session.UserID, req.GuildID, req.ChannelID)
+	err = h.actionParser.CreateActionsForMessage(c.UserContext(), data.Actions, permContext, msg.ID, false)
 	if err != nil {
-		return fmt.Errorf("Failed to create permission context: %w", err)
-	}
-
-	err = h.actionParser.CreateActionsForMessage(c.Context(), data.Actions, permContext, msg.ID, false)
-	if err != nil {
-		log.Error().Err(err).Msg("failed to create actions for message")
+		slog.Error("failed to create actions for message", slog.Any("error", err))
 		return err
 	}
 
@@ -159,10 +175,14 @@ func (h *SendMessageHandler) HandleSendMessageToWebhook(c *fiber.Ctx, req wire.M
 	data := &actions.MessageWithActions{}
 	err := json.Unmarshal([]byte(req.Data), data)
 	if err != nil {
-		return err
+		return invalidMessage(err)
 	}
 
-	params := &discordgo.WebhookParams{
+	if req.WebhookPlatform == wire.WebhookPlatformFluxer {
+		return h.sendToFluxerWebhook(c, req, data)
+	}
+
+	params := discord.WebhookMessageCreate{
 		Username:        data.Username,
 		AvatarURL:       data.AvatarURL,
 		AllowedMentions: data.AllowedMentions,
@@ -174,66 +194,59 @@ func (h *SendMessageHandler) HandleSendMessageToWebhook(c *fiber.Ctx, req wire.M
 		params.TTS = data.TTS
 	}
 
-	attachments := make([]*discordgo.MessageAttachment, len(req.Attachments))
-
-	for i, attachment := range req.Attachments {
-		dataURL, err := dataurl.DecodeString(attachment.DataURL)
-		if err != nil {
-			return helpers.BadRequest("invalid_attachments", "Failed to parse attachment data URL")
-		}
-
-		params.Files = append(params.Files, &discordgo.File{
-			Name:        attachment.Name,
-			ContentType: dataURL.ContentType(),
-			Reader:      bytes.NewReader(dataURL.Data),
-		})
-
-		attachments[i] = &discordgo.MessageAttachment{
-			ID: fmt.Sprintf("%d", i),
-		}
-	}
-
-	if req.WebhookType == "guilded" {
-		err := util.ExecuteGuildedWebhook(req.WebhookID, req.WebhookToken, params)
-		if err != nil {
-			return err
-		}
-
-		return c.JSON(wire.MessageSendResponseWire{
-			Success: true,
-			Data:    wire.MessageSendResponseDataWire{},
-		})
-	}
-
-	var msg *discordgo.Message
-	if req.ThreadID.Valid {
-		if req.MessageID.Valid {
-			msg, err = h.bot.Session.WebhookThreadMessageEdit(req.WebhookID, req.WebhookToken, req.ThreadID.String, req.MessageID.String, &discordgo.WebhookEdit{
-				Content:         &params.Content,
-				Embeds:          &params.Embeds,
-				Components:      &params.Components,
-				AllowedMentions: params.AllowedMentions,
-				Files:           params.Files,
-				Attachments:     &attachments,
-			})
-		} else {
-			msg, err = h.bot.Session.WebhookThreadExecute(req.WebhookID, req.WebhookToken, true, req.ThreadID.String, params)
-		}
-	} else {
-		if req.MessageID.Valid {
-			msg, err = h.bot.Session.WebhookMessageEdit(req.WebhookID, req.WebhookToken, req.MessageID.String, &discordgo.WebhookEdit{
-				Content:         &params.Content,
-				Embeds:          &params.Embeds,
-				Components:      &params.Components,
-				AllowedMentions: params.AllowedMentions,
-				Files:           params.Files,
-				Attachments:     &attachments,
-			})
-		} else {
-			msg, err = h.bot.Session.WebhookExecute(req.WebhookID, req.WebhookToken, true, params)
-		}
+	// Only the bot can handle interactive components, but webhooks send the rest. Checked before
+	// the attachments are decoded, as the request fails either way.
+	params.Components, err = h.actionParser.ParseMessageComponents(data.Components, false)
+	if errors.Is(err, parser.ErrInteractiveNotAllowed) {
+		return handlers.BadRequest("invalid_components", "Buttons with actions and select menus only work when the bot sends the message. Select a server and channel instead of a webhook.")
 	}
 	if err != nil {
+		return handlers.BadRequest("invalid_components", err.Error())
+	}
+
+	params.Files, err = decodeAttachments(req.Attachments)
+	if err != nil {
+		return err
+	}
+
+	var msg *discord.Message
+	if req.MessageID.Valid {
+		msg, err = h.rest.UpdateWebhookMessage(
+			common.DefinitelyID(req.WebhookID),
+			req.WebhookToken,
+			req.MessageID.ID,
+			discord.WebhookMessageUpdate{
+				Content:         &params.Content,
+				Embeds:          &params.Embeds,
+				Components:      &params.Components,
+				AllowedMentions: params.AllowedMentions,
+				Files:           params.Files,
+				Flags:           data.EditFlags(),
+			},
+			rest.UpdateWebhookMessageParams{
+				ThreadID:       req.ThreadID.ID,
+				WithComponents: true,
+			},
+		)
+	} else {
+		msg, err = h.rest.CreateWebhookMessage(
+			common.DefinitelyID(req.WebhookID),
+			req.WebhookToken,
+			params,
+			rest.CreateWebhookMessageParams{
+				Wait:           true,
+				ThreadID:       req.ThreadID.ID,
+				WithComponents: true,
+			},
+		)
+	}
+	if err != nil {
+		if common.IsDiscordRestErrorCode(err, rest.JSONErrorCodeUnknownWebhook) {
+			return handlers.NotFound("unknown_webhook", "The webhook does not exist.")
+		}
+		if editsComponentsV2ToLegacy(err) {
+			return componentsV2EditError
+		}
 		return err
 	}
 
@@ -244,4 +257,50 @@ func (h *SendMessageHandler) HandleSendMessageToWebhook(c *fiber.Ctx, req wire.M
 			ChannelID: msg.ChannelID,
 		},
 	})
+}
+
+func decodeAttachments(attachments []*wire.MessageAttachmentWire) ([]*discord.File, error) {
+	files := make([]*discord.File, 0, len(attachments))
+	for _, attachment := range attachments {
+		dataURL, err := dataurl.DecodeString(attachment.DataURL)
+		if err != nil {
+			return nil, handlers.BadRequest("invalid_attachments", "Failed to parse attachment data URL")
+		}
+
+		files = append(files, &discord.File{
+			Name: attachment.Name,
+			// ContentType: dataURL.ContentType(),
+			Reader: bytes.NewReader(dataURL.Data),
+		})
+	}
+	return files, nil
+}
+
+var componentsV2EditError = handlers.BadRequest(
+	"components_v2_edit",
+	"This message uses Components V2, which Discord doesn't let an edit turn off again. Enable Components V2 in the editor, or send it as a new message.",
+)
+
+// editsComponentsV2ToLegacy reports whether Discord refused an edit because it sends content or
+// embeds to a message that is already Components V2, or takes the flag away from it.
+func editsComponentsV2ToLegacy(err error) bool {
+	var restErr *rest.Error
+	return errors.As(err, &restErr) &&
+		(bytes.Contains(restErr.Errors, []byte("MESSAGE_CANNOT_USE_LEGACY_FIELDS_WITH_COMPONENTS_V2")) ||
+			bytes.Contains(restErr.Errors, []byte("MESSAGE_CANNOT_REMOVE_COMPONENTS_V2_FLAG")))
+}
+
+func checkMessageLimits(data *actions.MessageWithActions, features model.PlanFeatures) error {
+	for _, actionSet := range data.Actions {
+		if err := handlers.CheckActionSetLimit(actionSet, features); err != nil {
+			return err
+		}
+	}
+
+	return nil
+}
+
+// invalidMessage turns a message that doesn't decode into a 400 that says why.
+func invalidMessage(err error) error {
+	return handlers.BadRequest("invalid_message", fmt.Sprintf("Invalid message: %v", err))
 }

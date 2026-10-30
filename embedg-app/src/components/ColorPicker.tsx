@@ -7,26 +7,16 @@ interface Props {
   onChange: (newValue: number | undefined) => void;
 }
 
+/** undefined clears the color, null means the text isn't a color (yet). */
+function parseHexColor(text: string): number | undefined | null {
+  if (!text.trim()) return undefined;
+  const raw = text.trim().replace(/^#/, "");
+  if (!/^[0-9a-f]{6}$/i.test(raw)) return null;
+  return parseInt(raw, 16);
+}
+
 export default function ColorPicker({ value, onChange }: Props) {
   const [show, setShow] = useState(false);
-
-  function setHexColor(newColor: string) {
-    let raw = newColor.trim();
-    while (raw.startsWith("#")) {
-      raw = raw.substring(1);
-    }
-
-    if (raw) {
-      const value = parseInt(raw, 16);
-      if (!isNaN(value)) {
-        onChange(value);
-      } else {
-        onChange(undefined);
-      }
-    } else {
-      onChange(undefined);
-    }
-  }
 
   const hexColor = useMemo(() => {
     if (value || value === 0) {
@@ -36,19 +26,33 @@ export default function ColorPicker({ value, onChange }: Props) {
     }
   }, [value]);
 
-  const displayColor = hexColor ? "#" + hexColor : "#1f2225";
+  // What is typed while the input has focus, so that a half typed color isn't
+  // replaced with the value it happens to parse to. null shows the value.
+  const [draft, setDraft] = useState<string | null>(null);
+
+  function setColor(text: string) {
+    const color = parseHexColor(text);
+    if (color !== null && color !== value) onChange(color);
+  }
+
+  const displayColor = hexColor ? `#${hexColor}` : "#1f2225";
 
   return (
     <div className="flex space-x-2">
       <div className="flex">
-        <div className="bg-dark-1 rounded-l flex items-center px-2 text-gray-300">
+        <div className="bg-ink-900 rounded-l-lg flex items-center px-2 text-mist-300">
           #
         </div>
         <input
           type="text"
-          className="bg-dark-2 rounded-r p-2 w-full no-ring font-light text-white focus:outline-none"
-          value={hexColor}
-          onChange={(e) => setHexColor(e.target.value)}
+          aria-label="Hex color"
+          className="bg-ink-900 rounded-r-lg p-2 w-full font-light text-white focus:outline-none"
+          value={draft ?? hexColor}
+          onChange={(e) => {
+            setDraft(e.target.value);
+            setColor(e.target.value);
+          }}
+          onBlur={() => setDraft(null)}
           placeholder="rrggbb"
         />
       </div>
@@ -56,15 +60,16 @@ export default function ColorPicker({ value, onChange }: Props) {
         onClickOutside={() => setShow(false)}
         className="relative"
       >
-        <div
-          className="w-12 h-full rounded cursor-pointer relative bg-dark-5"
+        <button
+          type="button"
+          aria-label="Pick a color"
+          className="w-12 h-full rounded-lg cursor-pointer relative bg-ink-600"
           style={{ backgroundColor: displayColor }}
-          role="button"
           onClick={() => setShow(!show)}
         />
         {show && (
           <div className="absolute bottom-14 right-0">
-            <HexColorPicker color={"#" + hexColor} onChange={setHexColor} />
+            <HexColorPicker color={`#${hexColor}`} onChange={setColor} />
           </div>
         )}
       </ClickOutsideHandler>

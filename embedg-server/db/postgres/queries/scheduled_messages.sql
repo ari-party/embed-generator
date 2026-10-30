@@ -1,5 +1,5 @@
 -- name: GetDueScheduledMessages :many
-SELECT * FROM scheduled_messages WHERE next_at <= $1 AND (end_at IS NULL OR end_at >= $1) AND enabled = true;
+SELECT * FROM scheduled_messages WHERE next_at <= $1 AND enabled = true;
 
 -- name: GetScheduledMessages :many
 SELECT * FROM scheduled_messages WHERE guild_id = $1 ORDER BY updated_at DESC;
@@ -26,12 +26,15 @@ INSERT INTO scheduled_messages (
     start_at, 
     end_at, 
     next_at, 
-    only_once, 
+    run_times, 
     enabled, 
     created_at, 
-    updated_at
+    updated_at,
+    message_webhook_id,
+    cron_interval,
+    crosspost
 ) VALUES (
-    $1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18
+    $1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20, $21
 ) RETURNING *;
 
 -- name: UpdateScheduledMessage :one
@@ -46,14 +49,29 @@ UPDATE scheduled_messages SET
     next_at = $10, 
     start_at = $11, 
     end_at = $12, 
-    only_once = $13, 
+    run_times = $13, 
     enabled = $14, 
     updated_at = $15, 
-    cron_timezone = $16 
+    cron_timezone = $16,
+    message_webhook_id = $17,
+    cron_interval = $18,
+    crosspost = $19,
+    last_error = NULL,
+    last_error_at = NULL,
+    last_crosspost_error = NULL
 WHERE id = $1 AND guild_id = $2 RETURNING *;
 
--- name: UpdateScheduledMessageNextAt :one
-UPDATE scheduled_messages SET next_at = $3, updated_at = $4 WHERE id = $1 AND guild_id = $2 RETURNING *;
+-- name: RecordScheduledMessageRun :exec
+UPDATE scheduled_messages SET
+    next_at = sqlc.arg(next_at),
+    -- Only ever turns it off, the user may have disabled it while it was sending.
+    enabled = enabled AND sqlc.arg(enabled),
+    last_sent_at = COALESCE(sqlc.narg(last_sent_at), last_sent_at),
+    last_error = sqlc.narg(last_error),
+    last_error_at = sqlc.narg(last_error_at),
+    last_crosspost_error = sqlc.narg(last_crosspost_error),
+    updated_at = sqlc.arg(updated_at)
+WHERE id = sqlc.arg(id) AND guild_id = sqlc.arg(guild_id);
 
--- name: UpdateScheduledMessageEnabled :one
-UPDATE scheduled_messages SET enabled = $3, updated_at = $4 WHERE id = $1 AND guild_id = $2 RETURNING *;
+-- name: CountScheduledMessages :one
+SELECT COUNT(*) FROM scheduled_messages WHERE guild_id = $1;

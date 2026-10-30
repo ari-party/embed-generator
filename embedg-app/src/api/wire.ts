@@ -4,26 +4,74 @@ import {APIResponse} from "./base"
 //////////
 // source: assistant.go
 
-export interface AssistantGenerateMessageRequestWire {
-  base_data: null | string;
-  prompt: string;
+export interface AssistantChatMessageWire {
+  role: string;
+  content: string;
 }
-export interface AssistantGenerateMessageResponseDataWire {
+export interface AssistantChatRequestWire {
+  /**
+   * Message is the message in the editor as JSON.
+   */
+  message: string;
+  messages: AssistantChatMessageWire[];
+}
+export interface AssistantChatResponseDataWire {
+  /**
+   * Message is Markdown.
+   */
+  message: string;
+  /**
+   * Data is the new message as JSON, or empty if the answer doesn't change it.
+   */
   data: string;
+  /**
+   * BuildPrompt is a request the user can send to make the change the message suggests, if
+   * any.
+   */
+  build_prompt: string;
+  /**
+   * Fields ask the user for what the assistant needs but only they know.
+   */
+  fields: AssistantFieldWire[];
+  /**
+   * Issues are problems with the message the editor can't see, like roles the guild doesn't
+   * have, that the assistant couldn't fix.
+   */
+  issues: string[];
+  /**
+   * Repairs is how often the assistant fixed its own message.
+   */
+  repairs: number /* int */;
+  usage: AssistantUsageWire;
 }
-export type AssistantGenerateMessageResponseWire = APIResponse<AssistantGenerateMessageResponseDataWire>;
-
-//////////
-// source: auth.go
-
-export interface AuthExchangeRequestWire {
-  code: string;
+export type AssistantChatResponseWire = APIResponse<AssistantChatResponseDataWire>;
+export interface AssistantUsageWire {
+  prompts_used: number /* int */;
+  prompts_limit: number /* int */;
+  /**
+   * Unavailable says why the assistant can't be used right now, or is empty if it can.
+   */
+  unavailable: string;
+  /**
+   * LimitReached is whether it's unavailable because of the monthly limits, until ResetsAt.
+   */
+  limit_reached: boolean;
+  resets_at: string /* RFC3339 */;
 }
-export interface AuthExchangeResponseDataWire {
-  access_token: string;
-  session_token: string;
+export type AssistantUsageResponseWire = APIResponse<AssistantUsageWire>;
+/**
+ * AssistantFieldWire asks the user for something only they know, like a channel.
+ */
+export interface AssistantFieldWire {
+  label: string;
+  description: string;
+  /**
+   * Type is "text", "channel", "role" or "choice".
+   */
+  type: string;
+  options: string[];
+  default: string;
 }
-export type AuthExchangeResponseWire = APIResponse<AuthExchangeResponseDataWire>;
 
 //////////
 // source: custom_bots.go
@@ -119,6 +167,7 @@ export interface EmbedLinkCreateRequestWire {
   oe_provider_name: null | string;
   oe_provider_url: null | string;
   tw_card: null | string;
+  component_embed: Record<string, any> | null;
 }
 export interface EmbedLinkCreateResponseDataWire {
   id: string;
@@ -141,8 +190,12 @@ export interface GuildWire {
   id: string;
   name: string;
   icon: null | string;
-  has_channel_with_user_access: boolean;
-  has_channel_with_bot_access: boolean;
+  /**
+   * CanManageWebhooks comes from the user's server level permissions. A channel overwrite can still
+   * grant it in a single channel, so for sending it only puts likely servers first. Actions that
+   * send to another channel do require it at the server level, and the picker greys out channels by it.
+   */
+  can_manage_webhooks: boolean;
 }
 export type ListGuildsResponseWire = APIResponse<GuildWire[]>;
 export type GetGuildResponseWire = APIResponse<GuildWire>;
@@ -156,6 +209,14 @@ export interface GuildChannelWire {
   user_permissions: string;
   bot_access: boolean;
   bot_permissions: string;
+  /**
+   * BotCanSend is whether the bot can post its own messages here, as opposed to through a webhook.
+   */
+  bot_can_send: boolean;
+  /**
+   * BotCanEmbed is whether the bot's own messages here can have embeds. Webhooks don't need it.
+   */
+  bot_can_embed: boolean;
 }
 export type ListChannelsResponseWire = APIResponse<GuildChannelWire[]>;
 export interface GuildRoleWire {
@@ -196,7 +257,7 @@ export interface ImageWire {
   user_id: string;
   guild_id: null | string;
   file_name: string;
-  file_size: number /* int32 */;
+  file_size: number /* int */;
   cdn_url: string;
 }
 export type UploadImageResponseWire = APIResponse<ImageWire>;
@@ -225,11 +286,30 @@ export type SavedMessageCreateResponseWire = APIResponse<SavedMessageWire>;
 export interface SavedMessageUpdateRequestWire {
   name: string;
   description: null | string;
-  data: Record<string, any> | null;
+  /**
+   * Data is left as it is when omitted, so a rename can't undo a newer overwrite.
+   */
+  data?: Record<string, any> | null;
 }
 export type SavedMessageUpdateResponseWire = APIResponse<SavedMessageWire>;
 export type SavedMessageDeleteResponseWire = APIResponse<{
   }>;
+/**
+ * SavedMessageVersionWire is what a saved message looked like before it was overwritten.
+ */
+export interface SavedMessageVersionWire {
+  id: string;
+  /**
+   * CreatedAt is when the version was saved, not when it was overwritten.
+   */
+  created_at: string /* RFC3339 */;
+  name: string;
+}
+export type SavedMessageVersionListResponseWire = APIResponse<SavedMessageVersionWire[]>;
+export interface SavedMessageVersionDataWire extends SavedMessageVersionWire {
+  data: Record<string, any> | null;
+}
+export type SavedMessageVersionGetResponseWire = APIResponse<SavedMessageVersionDataWire>;
 export type SavedMessagesImportResponseWire = APIResponse<SavedMessageWire[]>;
 export interface SavedMessagesImportRequestWire {
   messages: SavedMessageImportDataWire[];
@@ -239,8 +319,15 @@ export interface SavedMessageImportDataWire {
   description: null | string;
   data: Record<string, any> | null;
 }
+/**
+ * WebhookPlatform is where a webhook lives. Fluxer's webhooks take Discord's message format, minus
+ * the components and threads.
+ */
+export type WebhookPlatform = string;
+export const WebhookPlatformDiscord: WebhookPlatform = "discord";
+export const WebhookPlatformFluxer: WebhookPlatform = "fluxer";
 export interface MessageSendToWebhookRequestWire {
-  webhook_type: string;
+  webhook_platform: WebhookPlatform;
   webhook_id: string;
   webhook_token: string;
   thread_id: null | string;
@@ -268,6 +355,7 @@ export interface MessageSendResponseDataWire {
 }
 export type MessageSendResponseWire = APIResponse<MessageSendResponseDataWire>;
 export interface MessageRestoreFromWebhookRequestWire {
+  webhook_platform: WebhookPlatform;
   webhook_id: string;
   webhook_token: string;
   thread_id: null | string;
@@ -288,12 +376,15 @@ export type MessageRestoreResponseWire = APIResponse<MessageRestoreResponseDataW
 // source: premium.go
 
 export interface GetPremiumPlanFeaturesResponseDataWire {
+  /**
+   * Plan is the name of the plan. For a user or guild it's their most expensive one, or empty for free.
+   */
+  plan: string;
   max_saved_messages: number /* int */;
+  max_saved_message_versions: number /* int */;
   max_actions_per_component: number /* int */;
   advanced_action_types: boolean;
-  ai_assistant: boolean;
-  components_v2: boolean;
-  component_types: number /* int */[];
+  max_ai_prompts_per_month: number /* int */;
   custom_bot: boolean;
   max_custom_commands: number /* int */;
   is_premium: boolean;
@@ -304,6 +395,10 @@ export interface GetPremiumPlanFeaturesResponseDataWire {
   max_kv_keys: number /* int */;
 }
 export type GetPremiumPlanFeaturesResponseWire = APIResponse<GetPremiumPlanFeaturesResponseDataWire>;
+/**
+ * ListPremiumPlansResponseWire has the plans that can be bought, from the cheapest to the most expensive.
+ */
+export type ListPremiumPlansResponseWire = APIResponse<GetPremiumPlanFeaturesResponseDataWire[]>;
 export interface PremiumEntitlementWire {
   id: string;
   sku_id: string;
@@ -314,6 +409,7 @@ export interface PremiumEntitlementWire {
   starts_at: null | string /* RFC3339 */;
   ends_at: null | string /* RFC3339 */;
   consumable: boolean;
+  plan: string;
   consumed: boolean;
   consumed_guild_id: null | string;
 }
@@ -337,52 +433,118 @@ export interface ScheduledMessageWire {
   channel_id: string;
   message_id: null | string;
   thread_name: null | string;
+  crosspost: boolean;
   saved_message_id: string;
   name: string;
   description: null | string;
   cron_expression: null | string;
   cron_timezone: null | string;
+  cron_interval: number /* int */;
   start_at: string /* RFC3339 */;
   end_at: null | string /* RFC3339 */;
   next_at: string /* RFC3339 */;
-  only_once: boolean;
+  run_times: string[] | null;
   enabled: boolean;
   created_at: string /* RFC3339 */;
   updated_at: string /* RFC3339 */;
+  last_sent_at: null | string /* RFC3339 */;
+  /**
+   * LastError is why the last run failed, or why the message was stopped when it's disabled.
+   */
+  last_error: null | string;
+  last_error_at: null | string /* RFC3339 */;
+  /**
+   * LastCrosspostError is why the last sent message wasn't published.
+   */
+  last_crosspost_error: null | string;
 }
 export type ScheduledMessageListResponseWire = APIResponse<ScheduledMessageWire[]>;
 export type ScheduledMessageGetResponseWire = APIResponse<ScheduledMessageWire>;
-export interface ScheduledMessageCreateRequestWire {
+/**
+ * ScheduledMessageScheduleWire is when a scheduled message is sent: on the dates in run_times, or
+ * repeating on cron_expression.
+ */
+export interface ScheduledMessageScheduleWire {
+  /**
+   * RunTimes are the dates to send on, one for a message sent once.
+   */
+  run_times: string[] | null;
+  cron_expression: null | string;
+  cron_timezone: null | string;
+  /**
+   * CronInterval runs the cron expression only in every Nth day, week, month or hour, counted
+   * from its first run. 0 or left out means every one.
+   */
+  cron_interval: number /* int */;
+  /**
+   * StartAt is where a repeating schedule starts, the first date for one on dates.
+   */
+  start_at: string /* RFC3339 */;
+  end_at: null | string /* RFC3339 */;
+  /**
+   * EndAfterRuns ends the schedule after this many sends from its next one, instead of at end_at.
+   */
+  end_after_runs: number /* int */;
+}
+export interface ScheduledMessageCreateRequestWire extends ScheduledMessageScheduleWire {
   channel_id: string;
   message_id: null | string;
   thread_name: null | string;
+  crosspost: boolean;
   saved_message_id: string;
   name: string;
   description: null | string;
-  cron_expression: null | string;
-  cron_timezone: null | string;
-  start_at: string /* RFC3339 */;
-  end_at: null | string /* RFC3339 */;
-  only_once: boolean;
   enabled: boolean;
 }
 export type ScheduledMessageCreateResponseWire = APIResponse<ScheduledMessageWire>;
-export interface ScheduledMessageUpdateRequestWire {
-  channel_id: string;
-  message_id: null | string;
-  thread_name: null | string;
-  saved_message_id: string;
-  name: string;
-  description: null | string;
-  cron_expression: null | string;
-  cron_timezone: null | string;
-  start_at: string /* RFC3339 */;
-  end_at: null | string /* RFC3339 */;
-  only_once: boolean;
-  enabled: boolean;
-}
+export type ScheduledMessageUpdateRequestWire = ScheduledMessageCreateRequestWire;
 export type ScheduledMessageUpdateResponseWire = APIResponse<ScheduledMessageWire>;
 export type ScheduledMessageDeleteResponseWire = APIResponse<{
+  }>;
+export interface ScheduledMessagePreviewWire {
+  /**
+   * Runs are the next sends, none past end_at.
+   */
+  runs: string /* RFC3339 */[];
+  /**
+   * More is whether more sends follow the listed ones.
+   */
+  more: boolean;
+  /**
+   * EndAt is when the schedule ends, also when it ends after a number of sends.
+   */
+  end_at: null | string /* RFC3339 */;
+}
+export type ScheduledMessagePreviewResponseWire = APIResponse<ScheduledMessagePreviewWire>;
+export interface ScheduledMessageRunWire {
+  scheduled_message_id: string;
+  at: string /* RFC3339 */;
+}
+export interface ScheduledMessageRunsWire {
+  /**
+   * Runs are the upcoming sends of the guild's enabled scheduled messages in the range.
+   */
+  runs: ScheduledMessageRunWire[];
+  /**
+   * Truncated is whether a message sends too often for all of its runs to be listed.
+   */
+  truncated: boolean;
+}
+export type ScheduledMessageRunsResponseWire = APIResponse<ScheduledMessageRunsWire>;
+/**
+ * MaxRunTimes is how many dates a scheduled message can be sent on.
+ */
+export const MaxRunTimes = 100;
+/**
+ * ScheduledMessageTestRequestWire is what a test send of a scheduled message needs, before it's
+ * saved. It always sends a new message.
+ */
+export interface ScheduledMessageTestRequestWire {
+  channel_id: string;
+  thread_name: null | string;
+  saved_message_id: string;
+}
+export type ScheduledMessageTestResponseWire = APIResponse<{
   }>;
 
 //////////

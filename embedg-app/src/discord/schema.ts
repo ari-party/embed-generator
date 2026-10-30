@@ -1,10 +1,12 @@
 import { z } from "zod";
 import { getUniqueId } from "../util";
 
-const VARIABLE_RE = new RegExp("\\{\\{[^}]+\\}\\}");
-const ATTACHMENT_RE = new RegExp("attachment://\\.+");
+export const COMPONENTS_V2_FLAG = 1 << 15;
 
-const HOSTNAME_RE = new RegExp("\\.[a-zA-Z]{2,}$");
+const VARIABLE_RE = /\{\{[^}]+\}\}/;
+const ATTACHMENT_RE = /^attachment:\/\/.+/;
+
+const HOSTNAME_RE = /\.[a-zA-Z]{2,}$/;
 const urlRefinement: [(v: string) => boolean, string] = [
   (v) => {
     if (v.match(VARIABLE_RE)) return true;
@@ -12,14 +14,14 @@ const urlRefinement: [(v: string) => boolean, string] = [
     try {
       const url = new URL(v);
       return !!url.hostname.match(HOSTNAME_RE);
-    } catch (e) {
+    } catch (_e) {
       return false;
     }
   },
   "Invalid URL",
 ];
 
-const IMAGE_PATH_RE = new RegExp("\\.(png|jpg|jpeg|webp|gif)$");
+const _IMAGE_PATH_RE = /\.(png|jpg|jpeg|webp|gif)$/;
 const imageUrlRefinement: [(v: string) => boolean, string] = [
   (v) => {
     if (v.match(VARIABLE_RE)) return true;
@@ -43,7 +45,7 @@ export const embedFooterTextSchema = z.optional(z.string().max(2048));
 export type EmbedFooterText = z.infer<typeof embedFooterTextSchema>;
 
 export const embedFooterIconUrlSchema = z.optional(
-  z.string().refine(...imageUrlRefinement)
+  z.string().refine(...imageUrlRefinement),
 );
 
 export type EmbedFooterIconUrl = z.infer<typeof embedFooterIconUrlSchema>;
@@ -52,13 +54,13 @@ export const embedFooterSchema = z.optional(
   z.object({
     text: embedFooterTextSchema,
     icon_url: embedFooterIconUrlSchema,
-  })
+  }),
 );
 
 export type EmbedFooter = z.infer<typeof embedFooterSchema>;
 
 export const embedImageUrlSchema = z.optional(
-  z.string().refine(...urlRefinement)
+  z.string().refine(...urlRefinement),
 );
 
 export type EmbedImageUrl = z.infer<typeof embedImageUrlSchema>;
@@ -66,13 +68,13 @@ export type EmbedImageUrl = z.infer<typeof embedImageUrlSchema>;
 export const embedImageSchema = z.optional(
   z.object({
     url: embedImageUrlSchema,
-  })
+  }),
 );
 
 export type EmbedImage = z.infer<typeof embedImageSchema>;
 
 export const embedThumbnailUrlSchema = z.optional(
-  z.string().refine(...urlRefinement)
+  z.string().refine(...urlRefinement),
 );
 
 export type EmbedThumbnailUrl = z.infer<typeof embedThumbnailUrlSchema>;
@@ -80,7 +82,7 @@ export type EmbedThumbnailUrl = z.infer<typeof embedThumbnailUrlSchema>;
 export const embedThumbnailSchema = z.optional(
   z.object({
     url: embedThumbnailUrlSchema,
-  })
+  }),
 );
 
 export type EmbedThumbnail = z.infer<typeof embedThumbnailSchema>;
@@ -90,13 +92,13 @@ export const embedAuthorNameSchema = z.string().min(1).max(256);
 export type EmbedAuthorName = z.infer<typeof embedAuthorNameSchema>;
 
 export const embedAuthorUrlSchema = z.optional(
-  z.string().refine(...urlRefinement)
+  z.string().refine(...urlRefinement),
 );
 
 export type EmbedAuthorUrl = z.infer<typeof embedAuthorUrlSchema>;
 
 export const embedAuthorIconUrlSchema = z.optional(
-  z.string().refine(...imageUrlRefinement)
+  z.string().refine(...imageUrlRefinement),
 );
 
 export type EmbedAuthorIconUrl = z.infer<typeof embedAuthorIconUrlSchema>;
@@ -106,7 +108,7 @@ export const embedAuthorSchema = z.optional(
     name: embedAuthorNameSchema,
     url: embedAuthorUrlSchema,
     icon_url: embedAuthorIconUrlSchema,
-  })
+  }),
 );
 
 export type EmbedAuthor = z.infer<typeof embedAuthorSchema>;
@@ -116,7 +118,7 @@ export const embedProviderNameSchema = z.string().min(1).max(256);
 export type EmbedProviderName = z.infer<typeof embedProviderNameSchema>;
 
 export const embedProviderUrlSchema = z.optional(
-  z.string().refine(...urlRefinement)
+  z.string().refine(...urlRefinement),
 );
 
 export type EmbedProviderUrl = z.infer<typeof embedProviderUrlSchema>;
@@ -125,7 +127,7 @@ export const embedProviderSchema = z.optional(
   z.object({
     name: embedProviderNameSchema,
     url: embedProviderUrlSchema,
-  })
+  }),
 );
 
 export type EmbedProvider = z.infer<typeof embedProviderSchema>;
@@ -163,7 +165,38 @@ export const embedUrlSchema = z.optional(z.string().refine(...urlRefinement));
 
 export type EmbedUrl = z.infer<typeof embedUrlSchema>;
 
-export const embedTimestampSchema = z.optional(z.string());
+const rfc3339Regex =
+  /^(\d{4})-(\d{2})-(\d{2})T(\d{2}):(\d{2}):(\d{2})(?:\.\d+)?(?:Z|[+-](\d{2}):(\d{2}))$/;
+
+/**
+ * Whether the server can parse `value` as a timestamp: RFC 3339, the subset of ISO 8601 with
+ * seconds and a Z or ±hh:mm offset, and a date that exists. zod's datetime() only checks the
+ * shape, so it lets through "+0200" and the 45th of a month, which the server rejects.
+ */
+export function isRfc3339(value: string): boolean {
+  const match = rfc3339Regex.exec(value);
+  if (!match) return false;
+
+  const [year, month, day, hour, minute, second, offsetHour, offsetMinute] =
+    match.slice(1).map((v) => (v === undefined ? 0 : Number(v)));
+  const daysInMonth = new Date(Date.UTC(year, month, 0)).getUTCDate();
+
+  return (
+    month >= 1 &&
+    month <= 12 &&
+    day >= 1 &&
+    day <= daysInMonth &&
+    hour < 24 &&
+    minute < 60 &&
+    second < 60 &&
+    offsetHour < 24 &&
+    offsetMinute < 60
+  );
+}
+
+export const embedTimestampSchema = z.optional(
+  z.string().refine(isRfc3339, "Must be a valid date"),
+);
 
 export type EmbedTimestamp = z.infer<typeof embedTimestampSchema>;
 
@@ -207,6 +240,23 @@ export const embedSchema = z
 
 export type MessageEmbed = z.infer<typeof embedSchema>;
 
+/** How much text Discord allows across all embeds of a message. */
+export const EMBEDS_TEXT_LIMIT = 6000;
+
+/** The text of an embed that counts towards `EMBEDS_TEXT_LIMIT`. */
+export function embedTextLength(
+  embed: Pick<MessageEmbed, "title" | "description" | "footer" | "author">,
+  fields: { name: string; value: string }[],
+): number {
+  return (
+    (embed.title?.length ?? 0) +
+    (embed.description?.length ?? 0) +
+    (embed.footer?.text?.length ?? 0) +
+    (embed.author?.name.length ?? 0) +
+    fields.reduce((sum, f) => sum + f.name.length + f.value.length, 0)
+  );
+}
+
 export const emojiSchema = z
   .object({
     id: z.optional(z.string()),
@@ -215,7 +265,7 @@ export const emojiSchema = z
   })
   .refine(
     (val) => val.id || val.name,
-    "Emoji must have either an id or a name"
+    "Emoji must have either an id or a name",
   );
 
 export type Emoji = z.infer<typeof emojiSchema>;
@@ -237,12 +287,14 @@ export type MessageComponentButtonStyle = z.infer<
   typeof componentButtonStyleSchema
 >;
 
+export const componentButtonLabelSchema = z.string().max(80);
+
 export const componentButtonSchema = z
   .object({
     id: uniqueIdSchema.default(() => getUniqueId()),
     type: z.literal(2),
     style: z.literal(1).or(z.literal(2)).or(z.literal(3)).or(z.literal(4)),
-    label: z.string(),
+    label: componentButtonLabelSchema,
     emoji: z.optional(z.nullable(emojiSchema)),
     disabled: z.optional(z.boolean()),
     action_set_id: z.string().default(() => getUniqueId().toString()),
@@ -252,12 +304,12 @@ export const componentButtonSchema = z
       id: uniqueIdSchema.default(() => getUniqueId()),
       type: z.literal(2),
       style: z.literal(5),
-      label: z.string(),
+      label: componentButtonLabelSchema,
       emoji: z.optional(z.nullable(emojiSchema)),
       url: z.string().refine(...urlRefinement),
       disabled: z.optional(z.boolean()),
       action_set_id: z.string().default(() => getUniqueId().toString()),
-    })
+    }),
   )
   .superRefine((data, ctx) => {
     if (!data.emoji && !data.label) {
@@ -322,7 +374,7 @@ export const componentThumbnailSchema = z.object({
   id: uniqueIdSchema.default(() => getUniqueId()),
   type: z.literal(11),
   media: unfurledMediaItemSchema,
-  description: z.optional(z.string()),
+  description: z.optional(z.string().max(1024)),
   spoiler: z.optional(z.boolean()),
 });
 
@@ -342,7 +394,7 @@ export type MessageComponentAccessory = z.infer<
 export const componentSectionSchema = z.object({
   id: uniqueIdSchema.default(() => getUniqueId()),
   type: z.literal(9),
-  components: z.array(componentTextDisplaySchema).min(1).max(5),
+  components: z.array(componentTextDisplaySchema).min(1).max(3),
   accessory: componentAccessorySchema,
 });
 
@@ -351,7 +403,7 @@ export type MessageComponentSection = z.infer<typeof componentSectionSchema>;
 export const componentMediaGalleryItemSchema = z.object({
   id: uniqueIdSchema.default(() => getUniqueId()),
   media: unfurledMediaItemSchema,
-  description: z.optional(z.string()),
+  description: z.optional(z.string().max(1024)),
   spoiler: z.optional(z.boolean()),
 });
 
@@ -406,7 +458,7 @@ export const componentContainerSchema = z.object({
   id: uniqueIdSchema.default(() => getUniqueId()),
   type: z.literal(17),
   components: z.array(componentContainerSubComponentSchema).min(1).max(10),
-  accent_color: z.optional(z.number()),
+  accent_color: embedColor,
   spoiler: z.optional(z.boolean()),
 });
 
@@ -429,61 +481,6 @@ export const componentSchema = z.union([
 
 export type MessageComponent = z.infer<typeof componentSchema>;
 
-export const messageActionSchema = z
-  .object({
-    type: z.literal(1).or(z.literal(6)).or(z.literal(8)), // text response
-    id: uniqueIdSchema.default(() => getUniqueId()),
-    text: z.string().min(1).max(2000),
-    public: z.boolean().default(false),
-    allow_role_mentions: z.boolean().default(false),
-  })
-  .or(
-    z.object({
-      type: z.literal(5).or(z.literal(7)).or(z.literal(9)), // saved messages responses
-      id: uniqueIdSchema.default(() => getUniqueId()),
-      target_id: z.string().min(1),
-      public: z.boolean().default(false),
-      allow_role_mentions: z.boolean().default(false),
-    })
-  )
-  .or(
-    z.object({
-      type: z.literal(2).or(z.literal(3)).or(z.literal(4)), // toggle, add, remove role
-      id: uniqueIdSchema.default(() => getUniqueId()),
-      target_id: z.string().min(1),
-      public: z.boolean().default(false),
-      allow_role_mentions: z.boolean().default(false),
-      disable_default_response: z.boolean().default(false),
-    })
-  )
-  .or(
-    z.object({
-      type: z.literal(10), // permission check with default response
-      id: uniqueIdSchema.default(() => getUniqueId()),
-      permissions: z.string().default("0"),
-      role_ids: z.array(z.string()),
-      disable_default_response: z.literal(false),
-    })
-  )
-  .or(
-    z.object({
-      type: z.literal(10), // permission check with custom response
-      id: uniqueIdSchema.default(() => getUniqueId()),
-      permissions: z.string().default("0"),
-      role_ids: z.array(z.string()),
-      disable_default_response: z.literal(true),
-      text: z.string().min(1).max(2000),
-    })
-  );
-
-export type MessageAction = z.infer<typeof messageActionSchema>;
-
-export const messageActionSetSchema = z.object({
-  actions: z.array(messageActionSchema), // .max(5), //.min(1),
-});
-
-export type MessageActionSet = z.infer<typeof messageActionSetSchema>;
-
 export const messageContentSchema = z.string().max(2000);
 
 export type MessageContent = z.infer<typeof messageContentSchema>;
@@ -496,18 +493,18 @@ export const webhookUsernameSchema = z.optional(
       (val) =>
         !val.toLowerCase().includes("clyde") &&
         !val.toLowerCase().includes("discord"),
-      "Username can't contain 'clyde' or 'discord'"
+      "Username can't contain 'clyde' or 'discord'",
     )
     .refine(
       (val) => val.toLowerCase() !== "everyone" && val.toLowerCase() !== "here",
-      "Username can't be 'everyone'  or 'here'"
-    )
+      "Username can't be 'everyone'  or 'here'",
+    ),
 );
 
 export type WebhookUsername = z.infer<typeof webhookUsernameSchema>;
 
 export const webhookAvatarUrlSchema = z.optional(
-  z.string().refine(...imageUrlRefinement)
+  z.string().refine(...imageUrlRefinement),
 );
 
 export type WebhookAvatarUrl = z.infer<typeof webhookAvatarUrlSchema>;
@@ -516,53 +513,256 @@ export const messageTtsSchema = z.boolean();
 
 export type MessageTts = z.infer<typeof messageTtsSchema>;
 
+export const mentionTypeSchema = z.enum(["users", "roles", "everyone"]);
+
 export const messageAllowedMentionsSchema = z.optional(
   z.object({
-    parse: z.array(
-      z.literal("users").or(z.literal("roles")).or(z.literal("everyone"))
-    ),
+    parse: z.array(mentionTypeSchema),
     roles: z.array(z.string()),
     users: z.array(z.string()),
     replied_user: z.boolean(),
-  })
+  }),
 );
 
 export const messageThreadName = z.optional(z.string().max(100));
 
-export const messageSchema = z
-  .object({
-    content: messageContentSchema.default(""),
-    username: webhookUsernameSchema,
-    avatar_url: webhookAvatarUrlSchema,
-    tts: messageTtsSchema.default(false),
-    embeds: z.array(embedSchema).max(10).default([]),
-    allowed_mentions: messageAllowedMentionsSchema,
-    components: z.array(componentSchema).max(5).default([]),
-    thread_name: messageThreadName,
-    actions: z.record(z.string(), messageActionSetSchema).default({}),
-    flags: z.number().optional(),
-  })
-  .superRefine((data, ctx) => {
-    const flags = data.flags ?? 0;
-    if (flags & (1 << 15)) {
-      if (data.components.length == 0) {
+/** How much text Discord allows across all text displays of a message. */
+const TEXT_DISPLAYS_TEXT_LIMIT = 4000;
+
+/** How many action rows Discord allows in a message without components v2. */
+export const ACTION_ROWS_LIMIT = 5;
+
+/** How many components Discord allows in a components v2 message, nested ones included. */
+export const COMPONENTS_V2_LIMIT = 40;
+
+/** All components, nested ones and accessories included, as Discord counts them. */
+function componentCount(components: MessageComponent[]): number {
+  return components.reduce((count, component) => {
+    count += 1;
+    if ("components" in component) {
+      count += componentCount(component.components);
+    }
+    if ("accessory" in component && component.accessory) {
+      count += 1;
+    }
+    return count;
+  }, 0);
+}
+
+/** Every text display in the components, with the path to it. */
+function textDisplays(
+  components: MessageComponent[],
+  path: (string | number)[],
+): { content: string; path: (string | number)[] }[] {
+  return components.flatMap((component, i) => {
+    if (component.type === 10) {
+      return [{ content: component.content, path: [...path, i] }];
+    }
+    if ("components" in component) {
+      return textDisplays(component.components, [...path, i, "components"]);
+    }
+    return [];
+  });
+}
+
+const messageFieldsSchema = z.object({
+  content: messageContentSchema.default(""),
+  username: webhookUsernameSchema,
+  avatar_url: webhookAvatarUrlSchema,
+  tts: messageTtsSchema.default(false),
+  embeds: z.array(embedSchema).max(10).default([]),
+  allowed_mentions: messageAllowedMentionsSchema,
+  components: z.array(componentSchema).default([]),
+  thread_name: messageThreadName,
+  flags: z.number().optional(),
+});
+
+/** Discord's rules for a message as a whole, beyond those of its fields. */
+function refineMessage(
+  data: Pick<
+    z.infer<typeof messageFieldsSchema>,
+    "content" | "embeds" | "components" | "flags"
+  >,
+  ctx: z.RefinementCtx,
+) {
+  const flags = data.flags ?? 0;
+  if (flags & COMPONENTS_V2_FLAG) {
+    if (data.components.length === 0) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        path: ["components"],
+        message: "Components are required when components v2 is enabled",
+      });
+    }
+
+    const count = componentCount(data.components);
+    if (count > COMPONENTS_V2_LIMIT) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        path: ["components"],
+        message: `A message can't have more than ${COMPONENTS_V2_LIMIT} components, nested ones included (currently ${count})`,
+      });
+    }
+
+    const displays = textDisplays(data.components, ["components"]);
+    const length = displays.reduce((sum, d) => sum + d.content.length, 0);
+    if (length > TEXT_DISPLAYS_TEXT_LIMIT) {
+      // On every text display, as any of them can be shortened to fix it.
+      for (const display of displays) {
         ctx.addIssue({
           code: z.ZodIssueCode.custom,
-          path: ["components"],
-          message: "Components are required when components v2 is enabled",
-        });
-      }
-      // TODO: check total text display length <= 4000
-    } else {
-      // this currently doesn't take attachments into account
-      if (!data.content && !data.embeds.length && !data.components.length) {
-        ctx.addIssue({
-          code: z.ZodIssueCode.custom,
-          path: ["content"],
-          message: "Content is required when no other fields are set",
+          path: [...display.path, "content"],
+          message: `All text displays together can't have more than ${TEXT_DISPLAYS_TEXT_LIMIT} characters (currently ${length})`,
         });
       }
     }
-  });
+  } else {
+    // this currently doesn't take attachments into account
+    if (!data.content && !data.embeds.length && !data.components.length) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        path: ["content"],
+        message: "Content is required when no other fields are set",
+      });
+    }
+
+    if (data.components.length > ACTION_ROWS_LIMIT) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        path: ["components"],
+        message: `A message can't have more than ${ACTION_ROWS_LIMIT} action rows without components v2`,
+      });
+    }
+
+    const length = data.embeds.reduce(
+      (sum, embed) => sum + embedTextLength(embed, embed.fields),
+      0,
+    );
+    if (length > EMBEDS_TEXT_LIMIT) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        path: ["embeds"],
+        message: `All embeds together can't have more than ${EMBEDS_TEXT_LIMIT} characters (currently ${length})`,
+      });
+    }
+  }
+}
+
+/** What a message has that a response doesn't send. */
+export const RESPONSE_MESSAGE_OMIT = {
+  username: true,
+  avatar_url: true,
+  tts: true,
+  thread_name: true,
+} as const;
+
+/**
+ * A message that an action responds with itself instead of naming a saved
+ * message. It can only have link buttons, so it has no actions of its own.
+ */
+export const responseMessageSchema = messageFieldsSchema
+  .omit(RESPONSE_MESSAGE_OMIT)
+  .superRefine(refineMessage);
+
+export type ResponseMessage = z.infer<typeof responseMessageSchema>;
+
+// The fields shared by the actions that send to another channel.
+const channelActionFields = {
+  id: uniqueIdSchema.default(() => getUniqueId()),
+  channel_id: z.string().min(1),
+  allow_role_mentions: z.boolean().default(false),
+  disable_default_response: z.boolean().default(false),
+};
+
+export const messageActionSchema = z
+  .object({
+    type: z.literal(1).or(z.literal(6)).or(z.literal(8)), // text response
+    id: uniqueIdSchema.default(() => getUniqueId()),
+    text: z.string().min(1).max(2000),
+    public: z.boolean().default(false),
+    allow_role_mentions: z.boolean().default(false),
+  })
+  .or(
+    z.object({
+      type: z.literal(5).or(z.literal(7)).or(z.literal(9)), // responses with a message of their own
+      id: uniqueIdSchema.default(() => getUniqueId()),
+      message: responseMessageSchema,
+      public: z.boolean().default(false),
+      allow_role_mentions: z.boolean().default(false),
+    }),
+  )
+  .or(
+    z.object({
+      type: z.literal(5).or(z.literal(7)).or(z.literal(9)), // saved messages responses
+      id: uniqueIdSchema.default(() => getUniqueId()),
+      target_id: z.string().min(1),
+      public: z.boolean().default(false),
+      allow_role_mentions: z.boolean().default(false),
+    }),
+  )
+  .or(
+    z.object({
+      type: z.literal(2).or(z.literal(3)).or(z.literal(4)), // toggle, add, remove role
+      id: uniqueIdSchema.default(() => getUniqueId()),
+      target_id: z.string().min(1),
+      public: z.boolean().default(false),
+      allow_role_mentions: z.boolean().default(false),
+      disable_default_response: z.boolean().default(false),
+    }),
+  )
+  .or(
+    z.object({
+      type: z.literal(11), // text message to another channel
+      ...channelActionFields,
+      text: z.string().min(1).max(2000),
+    }),
+  )
+  .or(
+    z.object({
+      type: z.literal(12), // message of its own to another channel
+      ...channelActionFields,
+      message: responseMessageSchema,
+    }),
+  )
+  .or(
+    z.object({
+      type: z.literal(12), // saved message to another channel
+      ...channelActionFields,
+      target_id: z.string().min(1),
+    }),
+  )
+  .or(
+    z.object({
+      type: z.literal(10), // permission check with default response
+      id: uniqueIdSchema.default(() => getUniqueId()),
+      permissions: z.string().default("0"),
+      role_ids: z.array(z.string()),
+      disable_default_response: z.literal(false),
+    }),
+  )
+  .or(
+    z.object({
+      type: z.literal(10), // permission check with custom response
+      id: uniqueIdSchema.default(() => getUniqueId()),
+      permissions: z.string().default("0"),
+      role_ids: z.array(z.string()),
+      disable_default_response: z.literal(true),
+      text: z.string().min(1).max(2000),
+    }),
+  );
+
+export type MessageAction = z.infer<typeof messageActionSchema>;
+
+export const messageActionSetSchema = z.object({
+  actions: z.array(messageActionSchema), // .max(5), //.min(1),
+});
+
+export type MessageActionSet = z.infer<typeof messageActionSetSchema>;
+
+export const messageSchema = messageFieldsSchema
+  .extend({
+    actions: z.record(z.string(), messageActionSetSchema).default({}),
+  })
+  .superRefine(refineMessage);
 
 export type Message = z.infer<typeof messageSchema>;
