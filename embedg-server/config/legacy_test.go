@@ -97,6 +97,40 @@ func TestTOMLConfigWinsOverLegacy(t *testing.T) {
 	}
 }
 
+func TestFallbackConfigDir(t *testing.T) {
+	dir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(dir, LegacyConfigFile), []byte(legacyYAML), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	fallback := FallbackConfigDir
+	FallbackConfigDir = dir
+	t.Cleanup(func() { FallbackConfigDir = fallback })
+
+	t.Run("used without a local config", func(t *testing.T) {
+		t.Chdir(t.TempDir())
+
+		cfg := loadLegacyTestConfig(t)
+		if cfg.Discord.Token != "token" {
+			t.Errorf("discord.token = %q", cfg.Discord.Token)
+		}
+	})
+
+	t.Run("local config wins", func(t *testing.T) {
+		local := t.TempDir()
+		toml := "[discord]\nclient_id = \"1\"\nclient_secret = \"1\"\npublic_key = \"1\"\ntoken = \"local\"\n"
+		if err := os.WriteFile(filepath.Join(local, ConfigFile), []byte(toml), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		t.Chdir(local)
+
+		cfg := loadLegacyTestConfig(t)
+		if cfg.Discord.Token != "local" {
+			t.Errorf("discord.token = %q", cfg.Discord.Token)
+		}
+	})
+}
+
 func TestLegacyEnvVars(t *testing.T) {
 	t.Chdir(t.TempDir())
 	t.Setenv("EMBEDG_DISCORD__CLIENT_ID", "1")

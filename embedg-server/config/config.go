@@ -21,6 +21,9 @@ import (
 
 const ConfigFile = "embedg.toml"
 
+// FallbackConfigDir is searched when the working directory has no config file.
+var FallbackConfigDir = "/config"
+
 // Path overrides where the config file is read from. Unlike the default, a file set here has to
 // exist.
 var Path string
@@ -64,11 +67,7 @@ func loadBase(basePath string) (*koanf.Koanf, error) {
 
 	configPath := Path
 	if configPath == "" {
-		configPath = filepath.Join(basePath, ConfigFile)
-		legacyPath := filepath.Join(basePath, LegacyConfigFile)
-		if !fileExists(configPath) && fileExists(legacyPath) {
-			configPath = legacyPath
-		}
+		configPath = findConfigFile(basePath)
 	}
 
 	var err error
@@ -114,6 +113,17 @@ func loadBase(basePath string) (*koanf.Koanf, error) {
 	}
 
 	return k, nil
+}
+
+func findConfigFile(basePath string) string {
+	for _, dir := range []string{basePath, FallbackConfigDir} {
+		for _, name := range []string{ConfigFile, LegacyConfigFile} {
+			if path := filepath.Join(dir, name); fileExists(path) {
+				return path
+			}
+		}
+	}
+	return filepath.Join(basePath, ConfigFile)
 }
 
 func envKey(s string) string {
