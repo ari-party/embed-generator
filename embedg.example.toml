@@ -15,8 +15,8 @@ api_key = "" # for the AI assistant (optional)
 
 # The AI assistant. Plans set how many prompts it takes a month with max_ai_prompts_per_month.
 [assistant]
-model = "gpt-5-mini"
-reasoning_effort = "low"
+model = "gpt-6-luna"
+reasoning_effort = "medium"
 max_output_tokens = 16000 # per model call, reasoning included
 max_repairs = 2 # fixes of its own mistakes that don't count as prompts
 
@@ -75,7 +75,8 @@ is_premium = false
 custom_bot = false
 max_custom_commands = 0
 max_scheduled_messages = 5
-periodic_scheduled_messages = false
+# How many scheduled messages can repeat or be sent on more than one date.
+max_periodic_scheduled_messages = 1
 max_template_ops = 1000
 max_kv_keys = 10
 
@@ -99,7 +100,7 @@ custom_bot = true
 max_custom_commands = 25
 max_image_upload_size = 8000000
 max_scheduled_messages = 25
-periodic_scheduled_messages = true
+max_periodic_scheduled_messages = 25
 max_template_ops = 10000
 max_kv_keys = 1000
 
@@ -112,7 +113,7 @@ sku_id = "456"
 [premium.plans.features]
 max_saved_messages = 500
 max_saved_message_versions = 50
-max_actions_per_component = 20
+max_actions_per_component = 15
 advanced_action_types = true
 max_ai_prompts_per_month = 250
 is_premium = true
@@ -120,6 +121,6 @@ custom_bot = true
 max_custom_commands = 50
 max_image_upload_size = 8000000
 max_scheduled_messages = 100
-periodic_scheduled_messages = true
+max_periodic_scheduled_messages = 100
 max_template_ops = 10000
 max_kv_keys = 5000
